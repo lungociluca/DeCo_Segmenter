@@ -1,0 +1,17 @@
+import os
+
+device = "mps"
+
+out_image_path = "out.jpg"
+num_steps = 5
+guidance = 3.0
+image_height = 512
+image_width = 512
+num_images = 1
+label = "a picture of a dog"
+neg_label = "a picture of a background"
+seed = 12
+timeshift = 1
+order = 2
+
+save_maps = True

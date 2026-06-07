@@ -41,6 +41,7 @@ class AdamLMSampler(BaseSampler):
             self,
             order: int = 2,
             timeshift: float = 1.0,
+            save_maps: bool = False,
             guidance_interval_min: float = 0.0,
             guidance_interval_max: float = 1.0,
             lms_transform_fn: Callable = nop,
@@ -67,6 +68,8 @@ class AdamLMSampler(BaseSampler):
         self.timesteps = shift_respace_fn(timesteps, timeshift)
         self.timedeltas = self.timesteps[1:] - self.timesteps[:-1]
         self._reparameterize_coeffs()
+
+        self.save_maps = save_maps
 
     def _reparameterize_coeffs(self):
         solver_coeffs = [[] for _ in range(self.num_steps)]
@@ -100,7 +103,7 @@ class AdamLMSampler(BaseSampler):
         for i  in range(self.num_steps):
             cfg_x = torch.cat([x, x], dim=0)
             cfg_t = t_cur.repeat(2)
-            out = net(cfg_x, cfg_t, cfg_condition, i==self.num_steps-1 and True)
+            out = net(cfg_x, cfg_t, cfg_condition, self.save_maps and i==self.num_steps-1)
             if t_cur[0] > self.guidance_interval_min and t_cur[0] < self.guidance_interval_max:
                 guidance = self.guidance
                 out = self.guidance_fn(out, guidance)

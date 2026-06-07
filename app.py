@@ -41,9 +41,10 @@ from src.diffusion.base.guidance import simple_guidance_fn
 from src.diffusion.flow_matching.adam_sampling import AdamLMSampler
 from src.diffusion.flow_matching.scheduling import LinearScheduler
 from PIL import Image
-# import gradio as gr
 import tempfile
 from huggingface_hub import snapshot_download
+
+import config as local_config
 
 
 def instantiate_class(config):
@@ -64,10 +65,10 @@ def load_model(weight_dict, denoiser):
 
 
 class Pipeline:
-    def __init__(self, vae, denoiser, conditioner, resolution):
-        self.vae = vae.to("mps")
-        self.denoiser = denoiser.to("mps")
-        self.conditioner = conditioner.to("mps")
+    def __init__(self, vae, denoiser, conditioner, resolution, device):
+        self.vae = vae.to(device)
+        self.denoiser = denoiser.to(device)
+        self.conditioner = conditioner.to(device)
         self.conditioner.compile()
         self.resolution = resolution
         self.tmp_dir = tempfile.TemporaryDirectory(prefix="traj_gifs_")
@@ -77,15 +78,16 @@ class Pipeline:
         self.tmp_dir.cleanup()
 
     @torch.no_grad()
-    @torch.autocast(device_type="mps", dtype=torch.bfloat16)
-    def __call__(self, y, neg_prompt, num_images, seed, image_height, image_width, num_steps, guidance, timeshift, order):
+    @torch.autocast(device_type=local_config.device, dtype=torch.bfloat16)
+    def __call__(self, y, neg_prompt, num_images, seed, image_height, image_width, num_steps, guidance, timeshift, order, save_maps=False):
         diffusion_sampler = AdamLMSampler(
             order=order,
             scheduler=LinearScheduler(),
             guidance_fn=simple_guidance_fn,
             num_steps=num_steps,
             guidance=guidance,
-            timeshift=timeshift
+            timeshift=timeshift,
+            save_maps=save_maps
         )
         generator = torch.Generator(device="cpu").manual_seed(seed)
         image_height = image_height // 32 * 32
@@ -94,7 +96,7 @@ class Pipeline:
         self.denoiser.decoder_patch_scaling_w = image_width / 512
         xT = torch.randn((num_images, 3, image_height, image_width), device="cpu", dtype=torch.float32,
                          generator=generator)
-        xT = xT.to("mps")
+        xT = xT.to(local_config.device)
         with torch.no_grad():
             condition, uncondition = conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
 
@@ -164,23 +166,24 @@ if __name__ == "__main__":
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     denoiser = load_model(ckpt, denoiser)
-    denoiser = denoiser.to("mps")
-    vae = vae.to("mps")
+    denoiser = denoiser.to(local_config.device)
+    vae = vae.to(local_config.device)
     denoiser.eval()
 
 
-    pipeline = Pipeline(vae, denoiser, conditioner, args.resolution)
+    pipeline = Pipeline(vae, denoiser, conditioner, args.resolution, local_config.device)
 
-    num_steps = 5
-    guidance = 3.0
-    image_height = 512
-    image_width = 512
-    num_images = 1
-    label = "a picture of a dog"
-    neg_label = "a picture of a background"
-    seed = 12
-    timeshift = 1
-    order = 2
+    num_steps = local_config.num_steps
+    guidance =local_config.guidance
+    image_height = local_config.image_height
+    image_width = local_config.image_width
+    num_images = local_config.num_images
+    label = local_config.label
+    neg_label = local_config.neg_label
+    seed = local_config.seed
+    timeshift = local_config.timeshift
+    order = local_config.order
+    save_maps = local_config.save_maps
 
 
     images, animations = pipeline(
@@ -193,43 +196,7 @@ if __name__ == "__main__":
         num_steps,
         guidance,
         timeshift,
-        order
+        order,
+        save_maps
     )
-    images[0].save("out.jpg")
-
-
-    # with gr.Blocks() as demo:
-    #     # gr.Markdown(f"config:{args.config}\n\n ckpt_path:{args.ckpt_path}")
-    #     with gr.Row():
-    #         with gr.Column(scale=1):
-    #             num_steps = gr.Slider(minimum=1, maximum=100, step=1, label="num steps", value=25)
-    #             guidance = gr.Slider(minimum=0.1, maximum=10.0, step=0.1, label="CFG", value=4.0)
-    #             image_height = gr.Slider(minimum=128, maximum=1024, step=32, label="image height", value=512)
-    #             image_width = gr.Slider(minimum=128, maximum=1024, step=32, label="image width", value=512)
-    #             num_images = gr.Slider(minimum=1, maximum=4, step=1, label="num images", value=4)
-    #             label = gr.Textbox(label="positive prompt", value="Bucovina sheppered dog.")
-    #             neg_label = gr.Textbox(label="negative prompt", value="Unrealistic, JPEG artifacts.")
-    #             seed = gr.Slider(minimum=0, maximum=1000000, step=1, label="seed", value=0)
-    #             timeshift = gr.Slider(minimum=0.1, maximum=5.0, step=0.1, label="timeshift", value=3.0)
-    #             order = gr.Slider(minimum=1, maximum=4, step=1, label="order", value=2)
-    #         with gr.Column(scale=2):
-    #             btn = gr.Button("Generate")
-    #             output_sample = gr.Gallery(label="Images", columns=2, rows=2)
-    #         with gr.Column(scale=2):
-    #             output_trajs = gr.Gallery(label="Trajs of Diffusion", columns=2, rows=2)
-
-    #     btn.click(fn=pipeline,
-    #               inputs=[
-    #                   label,
-    #                   neg_label,
-    #                   num_images,
-    #                   seed,
-    #                   image_height,
-    #                   image_width,
-    #                   num_steps,
-    #                   guidance,
-    #                   timeshift,
-    #                   order
-    #               ], outputs=[output_sample, output_trajs])
-    # demo.launch(server_name="0.0.0.0", server_port=23231)
-    # # demo.launch(share=True, server_name="0.0.0.0", server_port=23231)
+    images[0].save(local_config.out_image_path)
