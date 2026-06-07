@@ -2,3 +2,7 @@ Qwen
 tools
 ckpts
 src/diffusion/flow_matching/sampling_back.py
+env/*
+clear.sh
+run.sh
+deco.ckpt

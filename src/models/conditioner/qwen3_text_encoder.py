@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import os
 from src.models.conditioner.base import BaseConditioner
 
 from transformers import Qwen3Model, Qwen2Tokenizer
@@ -8,6 +9,15 @@ from transformers import Qwen3Model, Qwen2Tokenizer
 class Qwen3TextEncoder(BaseConditioner):
     def __init__(self, weight_path: str, embed_dim:int=None, max_length=128):
         super().__init__()
+        # Normalize the path - remove leading ./ and convert to absolute path if it's a local path
+        normalized_path = weight_path.lstrip("./")
+        if os.path.exists(normalized_path) or os.path.exists(os.path.abspath(normalized_path)):
+            # It's a local path - use the absolute path
+            weight_path = os.path.abspath(normalized_path)
+        else:
+            # It's a HuggingFace model ID - use as is
+            weight_path = normalized_path
+        
         self.tokenizer = Qwen2Tokenizer.from_pretrained(weight_path, max_length=max_length, padding_side="right")
         # self.model = Qwen3Model.from_pretrained(weight_path, attn_implementation="flex_attention").to(torch.bfloat16)
         self.model = Qwen3Model.from_pretrained(weight_path).to(torch.bfloat16)
@@ -19,8 +29,8 @@ class Qwen3TextEncoder(BaseConditioner):
 
     def _impl_condition(self, y, metadata:dict={}):
         tokenized = self.tokenizer(y, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
-        input_ids = tokenized.input_ids.cuda()
-        attention_mask = tokenized.attention_mask.cuda()
+        input_ids = tokenized.input_ids.to("mps")
+        attention_mask = tokenized.attention_mask.to("mps")
         metadata["valid_length_y"] = torch.sum(attention_mask, dim=-1)
         y = self.model(input_ids=input_ids, attention_mask=attention_mask)[0]
         if y.shape[2] < self.embed_dim:

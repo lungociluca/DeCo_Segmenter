@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
+import os
+from datetime import datetime
 
 from functools import lru_cache
 from src.models.layers.attention_op import attention
@@ -38,7 +41,7 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x: torch.Tensor, y, pos) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y, pos, save_attention_maps: bool = False, attention_maps_dir: str = None, img_h: int = None, img_w: int = None):
         B, N, C = x.shape
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
@@ -60,7 +63,71 @@ class Attention(nn.Module):
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+        
+        # Extract attention maps if requested
+        attention_maps = None
+        attention_tuples = [
+            ("q-k", q, ky),
+            ("k-k", kx, ky)
+        ]
+        if save_attention_maps:
+            kx_reshaped = kx.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
+            
+            # Self-attention: q vs kx
+            self_attn_scores = torch.matmul(q, kx_reshaped.transpose(-2, -1)) * self.scale
+            self_attn_maps = torch.softmax(self_attn_scores, dim=-1).mean(dim=1)
+            
+            # Cross-attention
+            for label, current_q, current_k in attention_tuples:
+                cross_attn_scores = torch.matmul(current_q, current_k.transpose(-2, -1)) * self.scale
+                cross_attn_maps = torch.softmax(cross_attn_scores, dim=-1).mean(dim=1)
+                
+                # Save attention maps as images if directory is provided
+                if attention_maps_dir is not None:
+                    self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, attention_maps_dir, label, img_h, img_w)
+    
         return x
+    
+    def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, save_dir, label, img_h=None, img_w=None):
+        """
+        Save attention maps as images to specified directory.
+        
+        Args:
+            self_attn_maps: Self-attention maps, shape (B, N, N)
+            cross_attn_maps: Cross-attention maps, shape (B, N, M)
+            save_dir: Directory to save the images
+            img_h: Image height (in patches)
+            img_w: Image width (in patches)
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+                
+        # Determine spatial dimensions
+        N = self_attn_maps.shape[1]
+        if img_h is None or img_w is None:
+            # Assume square spatial arrangement
+            spatial_size = int(N ** 0.5)
+            img_h, img_w = spatial_size, spatial_size
+        
+        # Save cross-attention maps
+        cross_attn_np = cross_attn_maps.cpu().detach().numpy()[:,:,3]
+        for b in range(cross_attn_np.shape[0]):
+            # shape (N, M) - reshape query dimension to spatial
+            attn_map = cross_attn_np[b]  # shape (N, M)
+            attn_spatial = attn_map.reshape(img_h, img_w, -1)
+            # Average over text tokens (last dimension)
+            attn_spatial_avg = attn_spatial.mean(axis=2)
+            
+            fig, ax = plt.subplots(figsize=(img_w, img_h))
+            im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
+            ax.set_title(f'Cross-Attention - Batch {b}')
+            ax.set_xlabel('Image Width')
+            ax.set_ylabel('Image Height')
+            plt.colorbar(im, ax=ax)
+            
+            save_path = os.path.join(save_dir, f'cross_attn_b{b}_{label}.png')
+            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+            plt.close(fig)
 
 class FlattenDiTBlock(nn.Module):
     def __init__(self, hidden_size, groups,  mlp_ratio=4, ):
@@ -74,9 +141,9 @@ class FlattenDiTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
-    def forward(self, x, y, c, pos):
+    def forward(self, x, y, c, pos, save_attn=False, attn_maps_dir=None, img_h=None, img_w=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos)
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, save_attn, attn_maps_dir, img_h, img_w)
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -405,7 +472,7 @@ class PixNerDiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, y, save_maps=False):
         B, _, H, W = x.shape
         x = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
@@ -419,7 +486,7 @@ class PixNerDiT(nn.Module):
 
         s = self.s_embedder(x)
         for i in range(self.num_encoder_blocks):
-            s = self.blocks[i](s, y, condition, xpos)
+            s = self.blocks[i](s, y, condition, xpos, save_attn=save_maps, attn_maps_dir=f'{i}_attn_maps', img_h=H // self.patch_size, img_w=W // self.patch_size)
 
         s = torch.nn.functional.silu(t + s)
         batch_size, length, _ = s.shape

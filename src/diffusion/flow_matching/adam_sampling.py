@@ -100,7 +100,7 @@ class AdamLMSampler(BaseSampler):
         for i  in range(self.num_steps):
             cfg_x = torch.cat([x, x], dim=0)
             cfg_t = t_cur.repeat(2)
-            out = net(cfg_x, cfg_t, cfg_condition)
+            out = net(cfg_x, cfg_t, cfg_condition, i==self.num_steps-1 and True)
             if t_cur[0] > self.guidance_interval_min and t_cur[0] < self.guidance_interval_max:
                 guidance = self.guidance
                 out = self.guidance_fn(out, guidance)
