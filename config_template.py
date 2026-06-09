@@ -14,4 +14,5 @@ seed = 12
 timeshift = 1
 order = 2
 
+attention_maps_dir = "attn_maps"
 save_maps = True

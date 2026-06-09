@@ -12,6 +12,8 @@ from src.models.layers.patch_embed import Embed as Embed
 from src.models.layers.swiglu import SwiGLU as FeedForward
 from src.models.layers.rmsnorm import RMSNorm as Norm
 
+import config as local_config
+
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
@@ -81,14 +83,21 @@ class Attention(nn.Module):
             for label, current_q, current_k in attention_tuples:
                 cross_attn_scores = torch.matmul(current_q, current_k.transpose(-2, -1)) * self.scale
                 cross_attn_maps = torch.softmax(cross_attn_scores, dim=-1).mean(dim=1)
-                
+
+                mixed_attention_maps = torch.zeros(self_attn_maps.shape[0:-1], device=local_config.device)
+                cross_attn_maps_target_token = cross_attn_maps[:, :, 3] # TODO: better way than just selection 3?
+                for b_idx in range(mixed_attention_maps.shape[0]):
+                    for attn_idx in range(mixed_attention_maps.shape[1]):
+                        mixed_attention_maps[b_idx] += cross_attn_maps_target_token[b_idx, attn_idx] * self_attn_maps[b_idx, attn_idx]
+                mixed_attention_maps = torch.softmax(mixed_attention_maps, dim=1)
+
                 # Save attention maps as images if directory is provided
                 if attention_maps_dir is not None:
-                    self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, attention_maps_dir, label, img_h, img_w)
+                    self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, mixed_attention_maps, attention_maps_dir, label, img_h, img_w)
     
         return x
     
-    def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, save_dir, label, img_h=None, img_w=None):
+    def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, save_dir, label, img_h=None, img_w=None):
         """
         Save attention maps as images to specified directory.
         
@@ -126,6 +135,26 @@ class Attention(nn.Module):
             plt.colorbar(im, ax=ax)
             
             save_path = os.path.join(save_dir, f'cross_attn_b{b}_{label}.png')
+            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+            plt.close(fig)
+
+        # Save mixed attention maps
+        mixed_attention_np = mixed_attention_maps.cpu().detach().numpy()
+        for b in range(mixed_attention_np.shape[0]):
+            # shape (N, M) - reshape query dimension to spatial
+            attn_map = mixed_attention_np[b]  # shape (N, M)
+            attn_spatial = attn_map.reshape(img_h, img_w, -1)
+            # Average over text tokens (last dimension)
+            attn_spatial_avg = attn_spatial.mean(axis=2)
+            
+            fig, ax = plt.subplots(figsize=(img_w, img_h))
+            im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
+            ax.set_title(f'Mixed-Attention - Batch {b}')
+            ax.set_xlabel('Image Width')
+            ax.set_ylabel('Image Height')
+            plt.colorbar(im, ax=ax)
+            
+            save_path = os.path.join(save_dir, f'mixed_attn_b{b}_{label}.png')
             plt.savefig(save_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
@@ -485,9 +514,10 @@ class PixNerDiT(nn.Module):
             y = block(y, condition)
 
         s = self.s_embedder(x)
+        attention_maps_dir_format = os.path.join(local_config.attention_maps_dir, "{idx}_attn_maps")
         for i in range(self.num_encoder_blocks):
-            s = self.blocks[i](s, y, condition, xpos, save_attn=save_maps, attn_maps_dir=f'{i}_attn_maps', img_h=H // self.patch_size, img_w=W // self.patch_size)
-
+            s = self.blocks[i](s, y, condition, xpos, save_attn=save_maps, attn_maps_dir=attention_maps_dir_format.format(idx=i), img_h=H // self.patch_size, img_w=W // self.patch_size)
+       
         s = torch.nn.functional.silu(t + s)
         batch_size, length, _ = s.shape
         x = x.reshape(batch_size * length, self.in_channels, self.patch_size ** 2 )

@@ -11,3 +11,4 @@ gradio
 wandb
 webdataset
 tensorboard
+matplotlib
