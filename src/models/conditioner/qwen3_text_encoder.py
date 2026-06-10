@@ -21,7 +21,7 @@ class Qwen3TextEncoder(BaseConditioner):
         
         self.tokenizer = Qwen2Tokenizer.from_pretrained(weight_path, max_length=max_length, padding_side="right")
         # self.model = Qwen3Model.from_pretrained(weight_path, attn_implementation="flex_attention").to(torch.bfloat16)
-        self.model = Qwen3Model.from_pretrained(weight_path).to(torch.bfloat16)
+        self.model = Qwen3Model.from_pretrained(weight_path).to(torch.float32)
         self.model.compile()
         self.uncondition_embedding = None
         self.embed_dim = embed_dim

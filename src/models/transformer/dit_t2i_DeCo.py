@@ -43,7 +43,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x: torch.Tensor, y, pos, save_attention_maps: bool = False, attention_maps_dir: str = None, img_h: int = None, img_w: int = None):
+    def forward(self, x: torch.Tensor, y, pos, save_attention_maps: bool = False, attention_maps_dir: str = None, img_h: int = None, 
+                img_w: int = None, eval_mode=False):
         B, N, C = x.shape
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
@@ -72,7 +73,7 @@ class Attention(nn.Module):
             ("q-k", q, ky),
             ("k-k", kx, ky)
         ]
-        if save_attention_maps:
+        if save_attention_maps or eval_mode:
             kx_reshaped = kx.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
             
             # Self-attention: q vs kx
@@ -92,9 +93,12 @@ class Attention(nn.Module):
                 mixed_attention_maps = torch.softmax(mixed_attention_maps, dim=1)
 
                 # Save attention maps as images if directory is provided
-                if attention_maps_dir is not None:
+                if attention_maps_dir is not None and not eval_mode:
                     self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, mixed_attention_maps, attention_maps_dir, label, img_h, img_w)
-    
+
+            if eval_mode:
+                return x, mixed_attention_maps
+            
         return x
     
     def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, save_dir, label, img_h=None, img_w=None):
@@ -155,7 +159,7 @@ class Attention(nn.Module):
             plt.colorbar(im, ax=ax)
             
             save_path = os.path.join(save_dir, f'mixed_attn_b{b}_{label}.png')
-            plt.savefig(save_path, dpi=100, bbox_inches='tight')
+            plt.savefig(save_path, bbox_inches='tight')
             plt.close(fig)
 
 class FlattenDiTBlock(nn.Module):
@@ -172,8 +176,13 @@ class FlattenDiTBlock(nn.Module):
 
     def forward(self, x, y, c, pos, save_attn=False, attn_maps_dir=None, img_h=None, img_w=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
+        attn_res = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, save_attn, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval)
+        x = attn_res[0] if local_config.eval else attn_res
         x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, save_attn, attn_maps_dir, img_h, img_w)
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        if local_config.eval:
+            return attn_res
         return x
 
 class NerfEmbedder(nn.Module):
@@ -501,7 +510,7 @@ class PixNerDiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-    def forward(self, x, t, y, save_maps=False):
+    def forward(self, x, t, y, save_maps=False, eval_mode=False):
         B, _, H, W = x.shape
         x = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
@@ -517,7 +526,11 @@ class PixNerDiT(nn.Module):
         attention_maps_dir_format = os.path.join(local_config.attention_maps_dir, "{idx}_attn_maps")
         for i in range(self.num_encoder_blocks):
             s = self.blocks[i](s, y, condition, xpos, save_attn=save_maps, attn_maps_dir=attention_maps_dir_format.format(idx=i), img_h=H // self.patch_size, img_w=W // self.patch_size)
-       
+            if eval_mode:
+                s, maps = s
+                if i == 2:
+                    return maps.reshape(B, H//self.patch_size, W//self.patch_size)
+
         s = torch.nn.functional.silu(t + s)
         batch_size, length, _ = s.shape
         x = x.reshape(batch_size * length, self.in_channels, self.patch_size ** 2 )

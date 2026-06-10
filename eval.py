@@ -9,6 +9,7 @@ import os
 import torch
 import torch.nn as nn
 
+from deco_segmentor import DeCoSegmentor
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
@@ -66,19 +67,7 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_model(cls, cfg):
-        """Build a dummy model for testing."""
-        class DummyModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-            
-            def forward(self, x):
-                # Return a dummy output tensor
-                gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
-                mask = Image.open(gt_file_path)
-                mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-                return [{"sem_seg": torch.randn(mask_tensor.shape)}]
-        
-        return DummyModel()
+        return DeCoSegmentor(cfg)
     
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):

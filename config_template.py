@@ -16,3 +16,4 @@ order = 2
 
 attention_maps_dir = "attn_maps"
 save_maps = True
+eval = True
