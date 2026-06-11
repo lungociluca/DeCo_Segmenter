@@ -69,9 +69,10 @@ class Attention(nn.Module):
         
         # Extract attention maps if requested
         attention_maps = None
+        # TODO: different configurations for cross attenion, how about self-attention?
         attention_tuples = [
             ("q-k", q, ky),
-            ("k-k", kx, ky)
+            # ("k-k", kx, ky)
         ]
         if save_attention_maps or eval_mode:
             kx_reshaped = kx.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
@@ -524,11 +525,15 @@ class PixNerDiT(nn.Module):
 
         s = self.s_embedder(x)
         attention_maps_dir_format = os.path.join(local_config.attention_maps_dir, "{idx}_attn_maps")
+        maps_array = []
         for i in range(self.num_encoder_blocks):
             s = self.blocks[i](s, y, condition, xpos, save_attn=save_maps, attn_maps_dir=attention_maps_dir_format.format(idx=i), img_h=H // self.patch_size, img_w=W // self.patch_size)
             if eval_mode:
                 s, maps = s
-                if i == 2:
+                maps_array.append(maps)
+                # TODO
+                if i == 3:
+                    maps = torch.stack(maps_array).mean(dim=0)
                     return maps.reshape(B, H//self.patch_size, W//self.patch_size)
 
         s = torch.nn.functional.silu(t + s)

@@ -17,6 +17,94 @@ import matplotlib.pyplot as plt
 import config as local_config
 
 
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+
+
+def visualize_prediction(image, predictions, file_id, alpha=0.6):
+    """
+    image: torch.Tensor
+        Shape (3,H,W) or (1,3,H,W)
+
+    predictions: np.ndarray
+        Shape (num_classes,H,W)
+        logits or probabilities
+    """
+
+    # --------------------------
+    # Convert image
+    # --------------------------
+
+    if image.ndim == 4:
+        image = image.squeeze(0)
+
+    image = image.detach().cpu().permute(1, 2, 0).numpy()
+
+    # normalize for display
+    image = image.astype(np.float32)
+
+    if image.max() > 1:
+        image /= 255.0
+
+    image = np.clip(image, 0, 1)
+
+    # --------------------------
+    # Predicted class map
+    # --------------------------
+
+    pred_mask = np.argmax(predictions, axis=0)
+
+    num_classes = predictions.shape[0]
+
+    # ADE20K-style palette
+    colors = np.random.RandomState(42).rand(num_classes, 3)
+
+    cmap = ListedColormap(colors)
+
+    # --------------------------
+    # Overlay
+    # --------------------------
+
+    colored_mask = cmap(pred_mask)[..., :3]
+
+    overlay = (
+        (1 - alpha) * image
+        + alpha * colored_mask
+    )
+
+    overlay = np.clip(overlay, 0, 1)
+
+    # --------------------------
+    # Plot
+    # --------------------------
+
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(15, 5)
+    )
+
+    axes[0].imshow(image)
+    axes[0].set_title("Image")
+
+    axes[1].imshow(
+        pred_mask,
+        cmap=cmap,
+        interpolation="nearest"
+    )
+    axes[1].set_title("Prediction")
+
+    axes[2].imshow(overlay)
+    axes[2].set_title("Overlay")
+
+    for ax in axes:
+        ax.axis("off")
+
+    plt.tight_layout()
+    # TODO
+    plt.savefig(f"z_output/{file_id}.png")
+
+
 def instantiate_class(config):
     kwargs = config.get("init_args", {})
     class_module, class_name = config["class_path"].rsplit(".", 1)
@@ -66,9 +154,8 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        with torch.no_grad():
-            condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
-            attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, return_x_trajs=True)
+        condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
+        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, return_x_trajs=True)
         return attention_maps[1]
     
 
@@ -124,7 +211,7 @@ class DeCoSegmentor(torch.nn.Module):
         gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return [(i, self.categs[i]) for i in torch.unique(mask_tensor)]
+        return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8)]
 
     def call_with_defaults(self, x, prompt):
         return self.pipeline(
@@ -139,6 +226,21 @@ class DeCoSegmentor(torch.nn.Module):
     @staticmethod
     def resize_maps(attention_maps, new_shape):
         return F.interpolate(attention_maps, new_shape, mode="bilinear", align_corners=False)
+    
+    # @staticmethod
+    # def save_attn_map(attn_map, class_label):
+    #     attn_map = attn_map.cpu().detach().numpy()
+        
+    #     fig, ax = plt.subplots()
+    #     im = ax.imshow(attn_map, cmap='viridis', aspect='equal')
+    #     ax.set_title(f'Mixed-Attention')
+    #     ax.set_xlabel('Image Width')
+    #     ax.set_ylabel('Image Height')
+    #     plt.colorbar(im, ax=ax)
+        
+    #     save_path = os.path.join("z_output", f'{class_label}.png')
+    #     plt.savefig(save_path, bbox_inches='tight')
+        plt.close(fig)
 
     def forward(self, x):
         image_tensor = x[0]["image"]
@@ -147,39 +249,38 @@ class DeCoSegmentor(torch.nn.Module):
         prompt_format = "a picture of a {target}"
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
-        prediction[0] += 0.0
+        prediction[0] += 0.000001
 
         # TODO: switch order of interpolate and argmax?
         for label_idx, label in gt_idxs_and_labels:
             prompt = prompt_format.format(target=label)
             attention_maps = self.call_with_defaults(image_tensor, prompt)
             # select slice corresponding to positive prompt
-            attention_maps = attention_maps[0].unsqueeze(0).unsqueeze(0)
-            prediction[label_idx+1] += DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:])
+            attention_maps = attention_maps[1].unsqueeze(0).unsqueeze(0)
+            resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(0).squeeze(0)
+            prediction[label_idx.item()+1, :, :] += resized_map
+
+            # DeCoSegmentor.save_attn_map(resized_map, label)
+
+        class_prediction = np.argmax(prediction.detach().cpu().numpy(), axis=0).astype(np.uint8) * 30
+
+        # img_array = (image_tensor.cpu().numpy()).astype(np.uint8).transpose(1, 2, 0)
+        # Image.fromarray(img_array).save(f"z_output/{self.idx}_input_image.png")
         
-        class_prediction = np.argmax(prediction.detach().cpu().numpy(), axis=0).astype(np.uint8)
+        # # Save class_prediction as heatmap
+        # plt.figure()
+        # plt.imshow(class_prediction, cmap='viridis')
+        # plt.colorbar(label='Class Index')
+        # plt.title('Class Prediction')
+        # plt.axis('off')
+        # plt.savefig(f"z_output/{self.idx}_class_prediction_heatmap.png")
+        # plt.close()
 
-        img_array = (image_tensor.cpu().numpy()).astype(np.uint8).transpose(1, 2, 0)
-        Image.fromarray(img_array).save(f"z_output/{self.idx}_input_image.png")
-        
-        # Save class_prediction as heatmap
-        plt.figure()
-        plt.imshow(class_prediction, cmap='viridis')
-        plt.colorbar(label='Class Index')
-        plt.title('Class Prediction')
-        plt.axis('off')
-        plt.savefig(f"z_output/{self.idx}_class_prediction_heatmap.png")
-        plt.close()
+        visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
+                             x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
 
-        with open('hello.txt', "w") as f:
-            for ai in range(class_prediction.shape[0]):
-                for bi in range(class_prediction.shape[1]):
-                    f.write(f"{class_prediction[ai, bi]} ")
-                f.write("\n")
+        # self.idx += 1
+        # if self.idx == 3:
+        #     exit(0)
 
-            f.write(f"\n\nPREDICTS\n\n0: {prediction[:, 10, 30]}\n1: {prediction[:, 388, 399]}")
-        self.idx += 1
-        if self.idx == 1:
-            exit(0)
-
-        return [{"sem_seg": class_prediction}]
+        return [{"sem_seg": prediction}]
