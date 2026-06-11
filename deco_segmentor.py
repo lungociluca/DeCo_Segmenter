@@ -98,7 +98,7 @@ def visualize_prediction(image, predictions, class_names, file_id, alpha=0.6):
     # Add legend for class IDs and their colors
     unique_classes = np.unique(pred_mask)
     legend_elements = [
-        Patch(facecolor=colors[i], label=f"Class {class_names[i]}")
+        Patch(facecolor=colors[i], label=f"{class_names[i-1]}")
         for i in unique_classes
     ]
     axes[1].legend(
@@ -298,7 +298,7 @@ class DeCoSegmentor(torch.nn.Module):
                              x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
 
         # self.idx += 1
-        # if self.idx == 5:
+        # if self.idx == 3:
         #     exit(0)
 
         return [{"sem_seg": prediction}]
