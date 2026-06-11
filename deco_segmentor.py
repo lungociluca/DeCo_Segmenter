@@ -19,9 +19,10 @@ import config as local_config
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
 
 
-def visualize_prediction(image, predictions, file_id, alpha=0.6):
+def visualize_prediction(image, predictions, class_names, file_id, alpha=0.6):
     """
     image: torch.Tensor
         Shape (3,H,W) or (1,3,H,W)
@@ -93,6 +94,19 @@ def visualize_prediction(image, predictions, file_id, alpha=0.6):
         interpolation="nearest"
     )
     axes[1].set_title("Prediction")
+
+    # Add legend for class IDs and their colors
+    unique_classes = np.unique(pred_mask)
+    legend_elements = [
+        Patch(facecolor=colors[i], label=f"Class {class_names[i]}")
+        for i in unique_classes
+    ]
+    axes[1].legend(
+        handles=legend_elements,
+        loc="upper left",
+        bbox_to_anchor=(1, 1),
+        fontsize="small"
+    )
 
     axes[2].imshow(overlay)
     axes[2].set_title("Overlay")
@@ -211,7 +225,7 @@ class DeCoSegmentor(torch.nn.Module):
         gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8)]
+        return [(i, self.categs[i-1]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
 
     def call_with_defaults(self, x, prompt):
         return self.pipeline(
@@ -242,17 +256,20 @@ class DeCoSegmentor(torch.nn.Module):
     #     plt.savefig(save_path, bbox_inches='tight')
         plt.close(fig)
 
-    def forward(self, x):
+    @torch.no_grad()
+    def forward_no_grad(self, x):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = DeCoSegmentor.get_gt_shape(x)
         prompt_format = "a picture of a {target}"
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
-        prediction[0] += 0.000001
+        # 0.00002 too little
+        prediction[0] += 0.00001
 
         # TODO: switch order of interpolate and argmax?
         for label_idx, label in gt_idxs_and_labels:
+            print(self.idx, "LABEL", label)
             prompt = prompt_format.format(target=label)
             attention_maps = self.call_with_defaults(image_tensor, prompt)
             # select slice corresponding to positive prompt
@@ -262,7 +279,7 @@ class DeCoSegmentor(torch.nn.Module):
 
             # DeCoSegmentor.save_attn_map(resized_map, label)
 
-        class_prediction = np.argmax(prediction.detach().cpu().numpy(), axis=0).astype(np.uint8) * 30
+        # class_prediction = np.argmax(prediction.detach().cpu().numpy(), axis=0).astype(np.uint8)
 
         # img_array = (image_tensor.cpu().numpy()).astype(np.uint8).transpose(1, 2, 0)
         # Image.fromarray(img_array).save(f"z_output/{self.idx}_input_image.png")
@@ -277,10 +294,14 @@ class DeCoSegmentor(torch.nn.Module):
         # plt.close()
 
         visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
+                             ['background'] + self.categs,
                              x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
 
         # self.idx += 1
-        # if self.idx == 3:
+        # if self.idx == 5:
         #     exit(0)
 
         return [{"sem_seg": prediction}]
+    
+    def forward(self, x):
+        return self.forward_no_grad(x)
