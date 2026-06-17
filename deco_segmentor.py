@@ -98,7 +98,7 @@ def visualize_prediction(image, predictions, class_names, file_id, alpha=0.6):
     # Add legend for class IDs and their colors
     unique_classes = np.unique(pred_mask)
     legend_elements = [
-        Patch(facecolor=colors[i], label=f"{class_names[i-1]}")
+        Patch(facecolor=colors[i], label=f"{class_names[i]}")
         for i in unique_classes
     ]
     axes[1].legend(
@@ -168,8 +168,12 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
+        extra_dict = {
+            "prompt": y,
+            "eval_mode": local_config.eval
+        }
         condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
-        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, return_x_trajs=True)
+        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, extra_dict=extra_dict)
         return attention_maps[1]
     
 
@@ -206,7 +210,7 @@ class DeCoSegmentor(torch.nn.Module):
         self.idx = 0
         import json
         with open('catseg_configs/ade150.json') as f:
-            self.categs = json.load(f)
+            self.categs = ["background"] + json.load(f)
         self.categs_count = len(self.categs)
 
         # TODO None is instead of resolution
@@ -225,7 +229,7 @@ class DeCoSegmentor(torch.nn.Module):
         gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return [(i, self.categs[i-1]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
+        return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
 
     def call_with_defaults(self, x, prompt):
         return self.pipeline(
@@ -265,7 +269,7 @@ class DeCoSegmentor(torch.nn.Module):
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         # 0.00002 too little
-        prediction[0] += 0.00001
+        prediction[0] += local_config.background_threshold
 
         # TODO: switch order of interpolate and argmax?
         for label_idx, label in gt_idxs_and_labels:
@@ -273,9 +277,9 @@ class DeCoSegmentor(torch.nn.Module):
             prompt = prompt_format.format(target=label)
             attention_maps = self.call_with_defaults(image_tensor, prompt)
             # select slice corresponding to positive prompt
-            attention_maps = attention_maps[1].unsqueeze(0).unsqueeze(0)
+            attention_maps = attention_maps[0].unsqueeze(0).unsqueeze(0)
             resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(0).squeeze(0)
-            prediction[label_idx.item()+1, :, :] += resized_map
+            prediction[label_idx.item()] += resized_map
 
             # DeCoSegmentor.save_attn_map(resized_map, label)
 
@@ -294,7 +298,7 @@ class DeCoSegmentor(torch.nn.Module):
         # plt.close()
 
         visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
-                             ['background'] + self.categs,
+                             self.categs,
                              x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
 
         # self.idx += 1

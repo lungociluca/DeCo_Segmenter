@@ -86,7 +86,7 @@ class AdamLMSampler(BaseSampler):
             solver_coeffs[i] = coeffs
         self.solver_coeffs = solver_coeffs
 
-    def _impl_sampling(self, net, noise, condition, uncondition):
+    def _impl_sampling(self, net, noise, condition, uncondition, extra_dict=None):
         """
         sampling process of Euler sampler
         -

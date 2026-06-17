@@ -11,3 +11,4 @@ env_2/*
 __pycache__/
 detectron2/
 output/*
+attn_maps/*

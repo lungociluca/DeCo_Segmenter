@@ -1,7 +1,8 @@
 import torch
+import copy
 
 from src.diffusion.flow_matching.adam_sampling import AdamLMSampler
-
+import config as local_config
 
 class WrapperAdamLMSampler(AdamLMSampler):
 
@@ -9,7 +10,7 @@ class WrapperAdamLMSampler(AdamLMSampler):
         super().__init__(order=order, scheduler=scheduler, guidance_fn=guidance_fn, num_steps=num_steps, 
                          guidance=guidance, timeshift=timeshift, save_maps=save_maps)
 
-    def _impl_sampling(self, net, noise, condition, uncondition):
+    def _impl_sampling(self, net, noise, condition, uncondition, extra_dict=None):
         batch_size = noise.shape[0]
         cfg_condition = torch.cat([uncondition, condition], dim=0)
         x = noise
@@ -18,6 +19,7 @@ class WrapperAdamLMSampler(AdamLMSampler):
             cfg_x = torch.cat([x, x], dim=0)
             cfg_t = t_cur.repeat(2)
             cfg_condition = cfg_condition.to(torch.float32)
-            attention_maps = net(cfg_x, cfg_t, cfg_condition, self.save_maps and i==self.num_steps-1, eval_mode=True)
-        
+            copy_extra_dict = copy.deepcopy(extra_dict)
+            copy_extra_dict["save_maps"] = self.save_maps and i==self.num_steps-1
+            attention_maps = net(cfg_x, cfg_t, cfg_condition, extra_dict=copy_extra_dict)
         return attention_maps, attention_maps

@@ -25,15 +25,7 @@ class BaseSampler(nn.Module):
         raise NotImplementedError
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
-    def forward(self, net, noise, condition, uncondition, return_x_trajs=False, return_v_trajs=False):
-        x_trajs, v_trajs = self._impl_sampling(net, noise, condition, uncondition)
-        if return_x_trajs and return_v_trajs:
-            return x_trajs[-1], x_trajs, v_trajs
-        elif return_x_trajs:
-            return x_trajs[-1], x_trajs
-        elif return_v_trajs:
-            return x_trajs[-1], v_trajs
-        else:
-            return x_trajs[-1]
-
+    def forward(self, net, noise, condition, uncondition, return_x_trajs=False, return_v_trajs=False, extra_dict=None):
+        maps= self._impl_sampling(net, noise, condition, uncondition, extra_dict=extra_dict)
+        return maps
 
