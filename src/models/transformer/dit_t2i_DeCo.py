@@ -133,7 +133,7 @@ class Attention(nn.Module):
         """
         # Create directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
-        prompt_class = extra_dict["prompt"].split(" ")[-1]
+        prompt_class = extra_dict["prompt"].split(" ")[4]
         # Determine spatial dimensions
         N = self_attn_maps.shape[1]
         if img_h is None or img_w is None:
@@ -157,7 +157,7 @@ class Attention(nn.Module):
             ax.set_ylabel('Image Height')
             plt.colorbar(im, ax=ax)
             
-            save_path = os.path.join(save_dir, f'cross_attn_b{b}_{label}_{prompt_class}.png')
+            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
             plt.savefig(save_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
@@ -177,7 +177,7 @@ class Attention(nn.Module):
             ax.set_ylabel('Image Height')
             plt.colorbar(im, ax=ax)
             
-            save_path = os.path.join(save_dir, f'mixed_attn_b{b}_{label}_{prompt_class}.png')
+            save_path = os.path.join(save_dir, f'mixed_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
             plt.savefig(save_path, bbox_inches='tight')
             plt.close(fig)
 

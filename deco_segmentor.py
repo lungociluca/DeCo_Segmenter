@@ -159,7 +159,7 @@ class Pipeline:
         self.tmp_dir.cleanup()
 
     @torch.no_grad()
-    def __call__(self, x, y, neg_prompt, num_images, image_height, image_width):
+    def __call__(self, x, y, neg_prompt, num_images, image_height, image_width, extra_dict):
         image_height = image_height // 32 * 32 # TODO: related to attention maps resolution ? could get finer maps?
         image_width = image_width // 32 * 32
         self.denoiser.decoder_patch_scaling_h = image_height / 512
@@ -168,10 +168,6 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        extra_dict = {
-            "prompt": y,
-            "eval_mode": local_config.eval
-        }
         condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
         attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, extra_dict=extra_dict)
         return attention_maps[1]
@@ -231,41 +227,27 @@ class DeCoSegmentor(torch.nn.Module):
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
         return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
 
-    def call_with_defaults(self, x, prompt):
+    def call_with_defaults(self, x, prompt, extra_dict):
         return self.pipeline(
             x,
             prompt,
             local_config.neg_label,
             local_config.num_images,
             local_config.image_height,
-            local_config.image_width
+            local_config.image_width,
+            extra_dict
         )
     
     @staticmethod
     def resize_maps(attention_maps, new_shape):
         return F.interpolate(attention_maps, new_shape, mode="bilinear", align_corners=False)
-    
-    # @staticmethod
-    # def save_attn_map(attn_map, class_label):
-    #     attn_map = attn_map.cpu().detach().numpy()
-        
-    #     fig, ax = plt.subplots()
-    #     im = ax.imshow(attn_map, cmap='viridis', aspect='equal')
-    #     ax.set_title(f'Mixed-Attention')
-    #     ax.set_xlabel('Image Width')
-    #     ax.set_ylabel('Image Height')
-    #     plt.colorbar(im, ax=ax)
-        
-    #     save_path = os.path.join("z_output", f'{class_label}.png')
-    #     plt.savefig(save_path, bbox_inches='tight')
-        plt.close(fig)
 
     @torch.no_grad()
     def forward_no_grad(self, x):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = DeCoSegmentor.get_gt_shape(x)
-        prompt_format = "a picture of a {target}"
+        prompt_format = "a picture of a {target} and other objects, rest of the scene"
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         # 0.00002 too little
@@ -273,9 +255,15 @@ class DeCoSegmentor(torch.nn.Module):
 
         # TODO: switch order of interpolate and argmax?
         for label_idx, label in gt_idxs_and_labels:
-            print(self.idx, "LABEL", label)
             prompt = prompt_format.format(target=label)
-            attention_maps = self.call_with_defaults(image_tensor, prompt)
+            print(self.idx, "LABEL", label)
+            extra_dict = {
+                "prompt": prompt,
+                "eval_mode": local_config.eval,
+                "img_id": self.idx
+            }
+            
+            attention_maps = self.call_with_defaults(image_tensor, prompt, extra_dict)
             # select slice corresponding to positive prompt
             attention_maps = attention_maps[0].unsqueeze(0).unsqueeze(0)
             resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(0).squeeze(0)

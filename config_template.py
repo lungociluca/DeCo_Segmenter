@@ -4,8 +4,9 @@ from typing import List
 
 
 class CrossAttnType(Enum):
-    Q_K = 'q-q'
+    Q_K = 'q-k'
     K_K = 'k-k'
+    V_V = 'v-v'
 
 device = "mps"
 
@@ -25,7 +26,8 @@ attention_maps_dir = "attn_maps"
 save_maps = True
 eval = True
 
-dit_blocks = 2
+dit_blocks = 1
 cross_attention_types: List[CrossAttnType] = [
-    CrossAttnType.Q_K
+    CrossAttnType.Q_K,
 ]
+background_threshold = 0.0004
