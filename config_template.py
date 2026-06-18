@@ -25,6 +25,7 @@ order = 2
 attention_maps_dir = "attn_maps"
 save_maps = True
 eval = True
+eval_samples_limit = 2
 
 dit_blocks = 1
 cross_attention_types: List[CrossAttnType] = [

@@ -4,10 +4,13 @@ MaskFormer Training Script.
 
 This script is a simplified version of the training script in detectron2/tools.
 """
+from collections import OrderedDict
+import logging
 import os
 
 import torch
 import torch.nn as nn
+from torch.utils.data import Subset, DataLoader
 
 from deco_segmentor import DeCoSegmentor
 import detectron2.utils.comm as comm
@@ -20,10 +23,19 @@ from detectron2.evaluation import CityscapesInstanceEvaluator, CityscapesSemSegE
 
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.utils.logger import setup_logger
+from detectron2.data import build_detection_test_loader
+
 
 from detectron2.utils.file_io import PathManager
+from detectron2.evaluation import (
+    DatasetEvaluator,
+    inference_on_dataset,
+    print_csv_format,
+    verify_results,
+)
 import numpy as np
 from PIL import Image
+import config as local_config
 
 from cat_seg_conf import add_cat_seg_config
 
@@ -149,6 +161,80 @@ class Trainer(DefaultTrainer):
     #     return res
 
 
+
+class CustomTrainer(Trainer):
+
+    @staticmethod
+    def trim_data_loader(data_loader: DataLoader, samples_count: int):
+        dataset = data_loader.dataset
+        trimmed_dataset = Subset(dataset, list(range(min(samples_count, len(dataset)))))
+        trimmed_loader = DataLoader(
+            trimmed_dataset,
+            batch_size=data_loader.batch_size,
+            shuffle=False,  # Disable shuffle for trimmed data to preserve order
+            num_workers=data_loader.num_workers,
+            collate_fn=data_loader.collate_fn,
+            pin_memory=data_loader.pin_memory,
+            drop_last=False,  # Don't drop samples from trimmed data
+        )
+        return trimmed_loader
+
+    @classmethod
+    def test(cls, cfg, model, evaluators=None):
+        """
+        Evaluate the given model. The given model is expected to already contain
+        weights to evaluate.
+
+        Args:
+            cfg (CfgNode):
+            model (nn.Module):
+            evaluators (list[DatasetEvaluator] or None): if None, will call
+                :meth:`build_evaluator`. Otherwise, must have the same length as
+                ``cfg.DATASETS.TEST``.
+
+        Returns:
+            dict: a dict of result metrics
+        """
+        logger = logging.getLogger(__name__)
+        if isinstance(evaluators, DatasetEvaluator):
+            evaluators = [evaluators]
+        if evaluators is not None:
+            assert len(cfg.DATASETS.TEST) == len(evaluators), "{} != {}".format(
+                len(cfg.DATASETS.TEST), len(evaluators)
+            )
+
+        results = OrderedDict()
+        for idx, dataset_name in enumerate(cfg.DATASETS.TEST):
+            data_loader = CustomTrainer.trim_data_loader(cls.build_test_loader(cfg, dataset_name), local_config.eval_samples_limit)
+            # When evaluators are passed in as arguments,
+            # implicitly assume that evaluators can be created before data_loader.
+            if evaluators is not None:
+                evaluator = evaluators[idx]
+            else:
+                try:
+                    evaluator = cls.build_evaluator(cfg, dataset_name)
+                except NotImplementedError:
+                    logger.warn(
+                        "No evaluator found. Use `DefaultTrainer.test(evaluators=)`, "
+                        "or implement its `build_evaluator` method."
+                    )
+                    results[dataset_name] = {}
+                    continue
+            results_i = inference_on_dataset(model, data_loader, evaluator)
+            results[dataset_name] = results_i
+            if comm.is_main_process():
+                assert isinstance(
+                    results_i, dict
+                ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                    results_i
+                )
+                logger.info("Evaluation results for {} in csv format:".format(dataset_name))
+                print_csv_format(results_i)
+
+        if len(results) == 1:
+            results = list(results.values())[0]
+        return results
+
 def setup(args):
     """
     Create configs and perform basic setups.
@@ -170,13 +256,13 @@ def main(args):
     cfg = setup(args)
     torch.set_float32_matmul_precision("high")
 
-    model = Trainer.build_model(cfg)
+    model = CustomTrainer.build_model(cfg)
     DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
         cfg.MODEL.WEIGHTS, resume=args.resume
     )
-    res = Trainer.test(cfg, model)
+    res = CustomTrainer.test(cfg, model)
     if cfg.TEST.AUG.ENABLED:
-        res.update(Trainer.test_with_TTA(cfg, model))
+        res.update(CustomTrainer.test_with_TTA(cfg, model))
     if comm.is_main_process():
         verify_results(cfg, res)
     return res
