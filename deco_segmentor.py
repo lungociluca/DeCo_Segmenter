@@ -288,12 +288,8 @@ class DeCoSegmentor(torch.nn.Module):
         visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
                              self.categs,
                              x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
-
-        # self.idx += 1
-        # if self.idx == 3:
-        #     exit(0)
-
-        return [{"sem_seg": prediction}]
+        self.idx += 1
+        return [{"sem_seg": prediction[1:, :, :]}]
     
     def forward(self, x):
         return self.forward_no_grad(x)
