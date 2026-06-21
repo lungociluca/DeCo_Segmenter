@@ -247,7 +247,7 @@ class DeCoSegmentor(torch.nn.Module):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = DeCoSegmentor.get_gt_shape(x)
-        prompt_format = "a picture of a {target} and other objects, rest of the scene"
+        prompt_format = "a picture of a {target} whitin a complex scene"
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         # 0.00002 too little

@@ -3,6 +3,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import os
 from datetime import datetime
+import math
 
 from functools import lru_cache
 from src.models.layers.attention_op import attention
@@ -63,6 +64,38 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+    @staticmethod
+    def merge_heads_weighted_mean(cross_attn, self_attn, attn):
+        head_mean = torch.zeros(cross_attn[:,0,:,local_config.idx_token_of_interest].shape).to(local_config.device)
+        head_weight = torch.zeros(cross_attn.shape[1]).to(local_config.device)
+        for ii in range(cross_attn.shape[1]):
+            head_weight[ii] += cross_attn[:, ii, :, local_config.idx_token_of_interest].sum() / attn[:, ii, :, :].sum()
+        head_weight = torch.softmax(head_weight, dim=0)
+
+        head_mean = head_weight.unsqueeze(0).unsqueeze(2) * cross_attn[:, :, :, local_config.idx_token_of_interest]
+        return head_mean.mean(1)
+    
+    @staticmethod
+    def merge_head_average(cross_attn, self_attn, attn):
+        return cross_attn[:, :, :,local_config.idx_token_of_interest].mean(1)
+    
+    @staticmethod
+    def refine_via_multiplication(cross_attn, self_attn):
+        aggregated = torch.matmul(self_attn, cross_attn[:, :, :, local_config.idx_token_of_interest].unsqueeze(3).repeat((1, 1, 1, 4)))
+        return aggregated # TODO: merge and refine should expect [batch, heads, pathces, tokens] from cross attn, insted removed last dim here
+
+    @staticmethod
+    def refine_no_operation(cross_attn, self_attn):
+        return cross_attn
+    
+    @staticmethod
+    def merge_heads(cross_attn, self_attn, attn):
+        return Attention.merge_head_average(cross_attn, self_attn, attn)
+
+    @staticmethod
+    def refine_with_self_attention(cross_attn, self_attn):
+        return Attention.refine_via_multiplication(cross_attn, self_attn)
+
     def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False):
         B, N, C = x.shape
@@ -90,33 +123,26 @@ class Attention(nn.Module):
         # Extract attention maps if requested
         attention_maps = None
         # TODO: different configurations for cross attenion, how about self-attention?
-        attention_tuples = bulid_cross_attention_tuples(q, k, v, ky, vy)
+        # attention_tuples = bulid_cross_attention_tuples(q, k, v, ky, vy)
+        unbias_projection = extra_dict.get("unbias_projection")
         mixed_attention_maps_list = []
         if extra_dict["save_maps"] or eval_mode:
-            kx_reshaped = kx.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
-            
-            # Self-attention: q vs kx
-            self_attn_scores = torch.matmul(q, kx_reshaped.transpose(-2, -1)) * self.scale
-            self_attn_maps = torch.softmax(self_attn_scores, dim=-1).mean(dim=1)
-            
-            # Cross-attention
-            for label, current_q, current_k in attention_tuples:
-                cross_attn_scores = torch.matmul(current_q, current_k.transpose(-2, -1)) * self.scale
-                cross_attn_maps = torch.softmax(cross_attn_scores, dim=-1).mean(dim=1)
+            scale_factor = 1 / math.sqrt(q.size(-1))
+            attn_map = q @ k.transpose(-2, -1) * scale_factor
+            attn_map = torch.softmax(attn_map, dim=-1)
+            image_patches = attn_map.shape[2]
+            self_attn_maps = attn_map[:, :, :, 0:image_patches]
+            cross_attn_maps = attn_map[:, :, :, image_patches:]
 
-                mixed_attention_maps = torch.zeros(self_attn_maps.shape[0:-1], device=local_config.device)
-                cross_attn_maps_target_token = cross_attn_maps[:, :, 3] # TODO: better way than just selection 3?
-                for b_idx in range(mixed_attention_maps.shape[0]):
-                    for attn_idx in range(mixed_attention_maps.shape[1]):
-                        mixed_attention_maps[b_idx] += cross_attn_maps_target_token[b_idx, attn_idx] * self_attn_maps[b_idx, attn_idx]
-                mixed_attention_maps = torch.softmax(mixed_attention_maps, dim=1)
-                mixed_attention_maps_list.append(mixed_attention_maps)
-                # Save attention maps as images if directory is provided
-                if attention_maps_dir is not None:
-                    self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, mixed_attention_maps, attention_maps_dir, label, img_h, img_w,
-                                                        extra_dict=extra_dict)
+            aggregated = Attention.refine_with_self_attention(cross_attn_maps, self_attn_maps)
+            aggregated = Attention.merge_heads(aggregated, None, attn_map)
+            mixed_attention_maps_list.append(aggregated)
 
-        aggregated_attn_maps = torch.stack(mixed_attention_maps_list).mean(dim=0).softmax(dim=-1)
+            if attention_maps_dir is not None:
+                self._save_attention_maps_as_images(self_attn_maps, aggregated, aggregated, attention_maps_dir, "", img_h, img_w,
+                                                    extra_dict=extra_dict)
+
+        aggregated_attn_maps = torch.stack(mixed_attention_maps_list).mean(dim=0).softmax(dim=-1) # TODO: SOFTMAX??
         return x, aggregated_attn_maps
     
     def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, save_dir, label, img_h=None, img_w=None,
@@ -142,7 +168,7 @@ class Attention(nn.Module):
             img_h, img_w = spatial_size, spatial_size
         
         # Save cross-attention maps
-        cross_attn_np = cross_attn_maps.cpu().detach().numpy()[:,:,3]
+        cross_attn_np = cross_attn_maps.cpu().detach().numpy()
         for b in range(cross_attn_np.shape[0]):
             # shape (N, M) - reshape query dimension to spatial
             attn_map = cross_attn_np[b]  # shape (N, M)
@@ -157,29 +183,29 @@ class Attention(nn.Module):
             ax.set_ylabel('Image Height')
             plt.colorbar(im, ax=ax)
             
-            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
+            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_{prompt_class}_{label}.png')
             plt.savefig(save_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
         # Save mixed attention maps
-        mixed_attention_np = mixed_attention_maps.cpu().detach().numpy()
-        for b in range(mixed_attention_np.shape[0]):
-            # shape (N, M) - reshape query dimension to spatial
-            attn_map = mixed_attention_np[b]  # shape (N, M)
-            attn_spatial = attn_map.reshape(img_h, img_w, -1)
-            # Average over text tokens (last dimension)
-            attn_spatial_avg = attn_spatial.mean(axis=2)
+        # mixed_attention_np = mixed_attention_maps.cpu().detach().numpy()
+        # for b in range(mixed_attention_np.shape[0]):
+        #     # shape (N, M) - reshape query dimension to spatial
+        #     attn_map = mixed_attention_np[b]  # shape (N, M)
+        #     attn_spatial = attn_map.reshape(img_h, img_w, -1)
+        #     # Average over text tokens (last dimension)
+        #     attn_spatial_avg = attn_spatial.mean(axis=2)
             
-            fig, ax = plt.subplots(figsize=(img_w, img_h))
-            im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
-            ax.set_title(f'Mixed-Attention - Batch {b}')
-            ax.set_xlabel('Image Width')
-            ax.set_ylabel('Image Height')
-            plt.colorbar(im, ax=ax)
+        #     fig, ax = plt.subplots(figsize=(img_w, img_h))
+        #     im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
+        #     ax.set_title(f'Mixed-Attention - Batch {b}')
+        #     ax.set_xlabel('Image Width')
+        #     ax.set_ylabel('Image Height')
+        #     plt.colorbar(im, ax=ax)
             
-            save_path = os.path.join(save_dir, f'mixed_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
-            plt.savefig(save_path, bbox_inches='tight')
-            plt.close(fig)
+        #     save_path = os.path.join(save_dir, f'mixed_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
+        #     plt.savefig(save_path, bbox_inches='tight')
+        #     plt.close(fig)
 
 class FlattenDiTBlock(nn.Module):
     def __init__(self, hidden_size, groups,  mlp_ratio=4, ):
