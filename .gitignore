@@ -12,3 +12,5 @@ __pycache__/
 detectron2/
 output/*
 attn_maps/*
+prev_attn_maps/*
+run_configs/*
