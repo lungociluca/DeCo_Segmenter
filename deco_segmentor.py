@@ -168,7 +168,7 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
+        condition, uncondition = self.conditioner([y, neg_prompt]*num_images)
         attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, extra_dict=extra_dict)
         return attention_maps[1]
     
