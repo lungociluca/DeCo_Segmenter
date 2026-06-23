@@ -28,8 +28,9 @@ guidance = 3.0
 image_height = 512
 image_width = 512
 num_images = 1
-label = "a picture of a dog"
-neg_label = "a picture of a background"
+label = "a photograph of a dog"
+neg_label = "a photo of a something whitin a complex scene"
+
 seed = 12
 timeshift = 1
 order = 2
@@ -42,9 +43,15 @@ idx_token_of_interest = 3
 
 dit_blocks = 1
 background_threshold = 0.0004
+unbiasing_components_count = 2
+
+self_attn_softmax_temperature = 0.7
+cross_attn_softmax_temperature = 100
+aggregated_maps_softmax_temperature = 0.7
+
 cross_attention_types: List[CrossAttnType] = [
     CrossAttnType.Q_K,
 ]
-attention_aggregate_method: AttentionAggregateMethod = AttentionAggregateMethod.NO_OP
+attention_aggregate_method: AttentionAggregateMethod = AttentionAggregateMethod.MERGE_WITH_SELF_ATTN
 head_aggregate_method: HeadAggregateMethod = HeadAggregateMethod.MEAN
 attention_map_projection: AttentionMapsProjection = AttentionMapsProjection.NO_OP
