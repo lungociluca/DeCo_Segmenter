@@ -65,6 +65,15 @@ def set_projection_matrix_computation():
         return Attention.principal_comp_projection
     else:
         raise NotImplemented()
+    
+def set_maps_weighting():
+    config_weighting_method: local_config.MapsWeighting = local_config.maps_weighting
+    if config_weighting_method == local_config.MapsWeighting.NO_OP:
+        return Attention.maps_weighting_no_op
+    elif config_weighting_method == local_config.MapsWeighting.POOLING_OVER_COS_SIMILARITY:
+        return Attention.maps_weighting_pooling
+    else:
+        raise NotImplemented()
 
 class Attention(nn.Module):
     def __init__(
@@ -94,6 +103,7 @@ class Attention(nn.Module):
         self.aggregate_attn_maps = set_attention_aggregation()
         self.aggregate_heads = set_head_aggregation()
         self.get_projection = set_projection_matrix_computation()
+        self.maps_weighting = set_maps_weighting()
 
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
@@ -182,6 +192,30 @@ class Attention(nn.Module):
             return cross_attn - projection
         else:
             return cross_attn
+        
+    @staticmethod
+    def maps_weighting_no_op(cross_attn, kx, ky):
+        return torch.eye(cross_attn.shape[-1]).to(local_config.device)
+    
+    @staticmethod
+    def maps_weighting_pooling(cross_attn, kx, ky):
+        print(f"cross {cross_attn.shape}, kx {kx.shape}, ky {ky.shape}")
+        _, patches, prompts_count = cross_attn.shape
+        heads = kx.shape[1]
+        tokens_count = ky.shape[2] // prompts_count
+        
+        interest_tokens_k = torch.stack(
+            [ky[0, :, i * tokens_count + local_config.idx_token_of_interest, :] for i in range(prompts_count)],
+            dim=0
+        )
+        aggregated_kx = torch.matmul(cross_attn[0].unsqueeze(-1), einops.rearrange(kx[0], 'h p d -> p (h d)').unsqueeze(-2))
+        aggregated_kx = einops.rearrange(aggregated_kx.mean(0), 't (h d) -> t h d', h=heads)
+
+        cos = torch.nn.CosineSimilarity(dim=2)
+        output = cos(interest_tokens_k, aggregated_kx)
+        output = output.mean(-1)
+        output = output / torch.max(output)
+        return torch.diagflat(output).to(local_config.device)
 
     def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False):
@@ -199,7 +233,6 @@ class Attention(nn.Module):
         ky, vy = kv_y[0], kv_y[1]
         ky = self.k_norm(ky.contiguous())
 
-        # TODO: Should check if valid for downstream dit blocks
         ky = einops.rearrange(ky, 'b h t d -> h (b t) d').unsqueeze(0)
         k = torch.cat([kx, ky], dim=2)
         
@@ -219,13 +252,15 @@ class Attention(nn.Module):
             self.aggregate_heads(self_attn_maps)
         ).unsqueeze(0)
 
+        aggregated_attn_maps = torch.softmax(aggregated / local_config.aggregated_maps_softmax_temperature, dim=1)
+        aggregated_attn_maps = torch.matmul(aggregated_attn_maps, self.maps_weighting(aggregated_attn_maps, kx, ky))
+
         if attention_maps_dir is not None:
             for i in range(no_prompts):
-                aggregated_slice = aggregated[:, :, i]
+                aggregated_slice = aggregated_attn_maps[:, :, i]
                 self._save_attention_maps_as_images(self_attn_maps, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
                                                     extra_dict=extra_dict)
 
-        aggregated_attn_maps = torch.softmax(aggregated / local_config.aggregated_maps_softmax_temperature, dim=-1) # TODO: SOFTMAX??
         return torch.zeros(x.shape).to(local_config.device), aggregated_attn_maps
     
     def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, uncond_attn_maps, save_dir, slice_idx, 
