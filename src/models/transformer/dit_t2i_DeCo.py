@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import os
-from datetime import datetime
+import einops
+import math
 
 from functools import lru_cache
 from src.models.layers.attention_op import attention
@@ -38,6 +39,42 @@ def bulid_cross_attention_tuples(q, k, v, ky, vy):
         )
     return cross_attn_tuples
 
+def set_attention_aggregation():
+    config_aggregation_method: local_config.AttentionAggregateMethod = local_config.attention_aggregate_method
+    if config_aggregation_method == local_config.AttentionAggregateMethod.NO_OP:
+        return Attention.refine_no_operation
+    elif config_aggregation_method == local_config.AttentionAggregateMethod.MERGE_WITH_SELF_ATTN:
+        return Attention.refine_via_multiplication
+    else:
+        raise NotImplemented()
+    
+def set_head_aggregation():
+    config_head_agg_method: local_config.HeadAggregateMethod = local_config.head_aggregate_method
+    if config_head_agg_method == local_config.HeadAggregateMethod.MEAN:
+        return Attention.merge_head_average
+    elif config_head_agg_method == local_config.HeadAggregateMethod.WEIGHTED_MEAN:
+        return Attention.merge_heads_weighted_mean
+    else:
+        raise NotImplemented()
+    
+def set_projection_matrix_computation():
+    config_projection_method: local_config.AttentionMapsProjection = local_config.attention_map_projection
+    if config_projection_method == local_config.AttentionMapsProjection.NO_OP:
+        return Attention.projection_no_operation
+    elif config_projection_method == local_config.AttentionMapsProjection.ORTHOGONAL_TO_PRINCIPAL_COMP:
+        return Attention.principal_comp_projection
+    else:
+        raise NotImplemented()
+    
+def set_maps_weighting():
+    config_weighting_method: local_config.MapsWeighting = local_config.maps_weighting
+    if config_weighting_method == local_config.MapsWeighting.NO_OP:
+        return Attention.maps_weighting_no_op
+    elif config_weighting_method == local_config.MapsWeighting.POOLING_OVER_COS_SIMILARITY:
+        return Attention.maps_weighting_pooling
+    else:
+        raise NotImplemented()
+
 class Attention(nn.Module):
     def __init__(
             self,
@@ -63,64 +100,171 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        self.aggregate_attn_maps = set_attention_aggregation()
+        self.aggregate_heads = set_head_aggregation()
+        self.get_projection = set_projection_matrix_computation()
+        self.maps_weighting = set_maps_weighting()
+
+    @staticmethod
+    def softmax_for_each_prompt(attn_map, no_prompts):
+        """
+        attn_maps: [b, h, img_patches, img_patches + no_prompts * tokens]
+        """
+        cross_attn_maps_list = []
+        image_patches = attn_map.shape[2]
+        text_patches = 128
+        self_attn_maps = torch.softmax(
+            attn_map[:, :, :, 0:image_patches] / local_config.self_attn_softmax_temperature, 
+            dim=-1
+        ).contiguous()
+        
+        for i in range(no_prompts):
+            cross_attn_maps_list.append(
+                torch.softmax(
+                    attn_map[:, :, :, image_patches + i * text_patches + local_config.idx_token_of_interest] / local_config.cross_attn_softmax_temperature, 
+                    dim=-1
+                )
+            )
+        return self_attn_maps[0], torch.stack(cross_attn_maps_list, dim=-1)[0].contiguous()
+
+
+    @staticmethod
+    def merge_heads_weighted_mean(attn_maps):
+        # head_mean = torch.zeros(cross_attn[:,0,:].shape).to(local_config.device)
+        # head_weight = torch.zeros(cross_attn.shape[1]).to(local_config.device)
+        # for ii in range(cross_attn.shape[1]):
+        #     head_weight[ii] += cross_attn[:, ii, :].sum() / attn[:, ii, :, :].sum()
+        # head_weight = torch.softmax(head_weight, dim=0)
+
+        # head_mean = head_weight.unsqueeze(0).unsqueeze(2) * cross_attn
+        # return head_mean.mean(1)
+        return None
+    
+    @staticmethod
+    def merge_head_average(attn_maps):
+        return attn_maps.mean(0)
+    
+    @staticmethod
+    def refine_via_multiplication(cross_attn, self_attn):
+        """
+        self: (img_patches, img_patches)
+        cross: (img_patches, no_prompts)
+        """
+        aggregated = torch.matmul(
+            self_attn.unsqueeze(0).repeat(cross_attn.shape[-1], 1, 1), 
+            einops.rearrange(cross_attn, "p t -> t p").unsqueeze(-1)
+        )
+        return einops.rearrange(aggregated.sum(-1), "t p -> p t")
+
+    @staticmethod
+    def refine_no_operation(cross_attn, self_attn):
+        return cross_attn
+    
+    @staticmethod
+    def projection_no_operation(uncond_maps, img_h, img_w):
+        return None
+    
+    # @staticmethod
+    # def principal_comp_projection(uncond_maps, img_h, img_w):
+    #     H, IMG_P = uncond_maps.shape
+    #     uncond_maps = uncond_maps.reshape(H, img_h, img_w)[1].unsqueeze(0)
+    #     uncond_maps = einops.rearrange(uncond_maps, 'c h w -> c (h w)')
+    #     basis = torch.linalg.svd(
+    #         uncond_maps,
+    #         full_matrices=False
+    #     )[0]
+    #     basis = basis[:, :local_config.unbiasing_components_count].contiguous()
+    #     basis_mtrx = torch.eye(H, dtype=uncond_maps.dtype, device=local_config.device) - basis @ basis.T
+    #     return basis_mtrx
+
+    @staticmethod
+    def principal_comp_projection(uncond_maps, img_h, img_w):
+        return uncond_maps
+
+    
+    @staticmethod
+    def apply_projection(projection, cross_attn):
+        """
+        projection: (B, H, IMG_P, IMG_P) or (B, H, IMG_P)
+        cross_attn: (B, H, IMG_P)
+        """
+        if projection is not None:
+            return cross_attn - projection
+        else:
+            return cross_attn
+        
+    @staticmethod
+    def maps_weighting_no_op(cross_attn, kx, ky):
+        return torch.eye(cross_attn.shape[-1]).to(local_config.device)
+    
+    @staticmethod
+    def maps_weighting_pooling(cross_attn, kx, ky):
+        print(f"cross {cross_attn.shape}, kx {kx.shape}, ky {ky.shape}")
+        _, patches, prompts_count = cross_attn.shape
+        heads = kx.shape[1]
+        tokens_count = ky.shape[2] // prompts_count
+        
+        interest_tokens_k = torch.stack(
+            [ky[0, :, i * tokens_count + local_config.idx_token_of_interest, :] for i in range(prompts_count)],
+            dim=0
+        )
+        aggregated_kx = torch.matmul(cross_attn[0].unsqueeze(-1), einops.rearrange(kx[0], 'h p d -> p (h d)').unsqueeze(-2))
+        aggregated_kx = einops.rearrange(aggregated_kx.mean(0), 't (h d) -> t h d', h=heads)
+
+        cos = torch.nn.CosineSimilarity(dim=2)
+        output = cos(interest_tokens_k, aggregated_kx)
+        output = output.mean(-1)
+        output = output / torch.max(output)
+        return torch.diagflat(output).to(local_config.device)
+
     def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False):
         B, N, C = x.shape
+        no_prompts = y.shape[0]
+        # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
         q = self.q_norm(q.contiguous())
         kx = self.k_norm(kx.contiguous())
         q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
-        kv_y = self.kv_y(y).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        
+        # PROMPT PROJECTIONS
+        kv_y = self.kv_y(y).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky, vy = kv_y[0], kv_y[1]
         ky = self.k_norm(ky.contiguous())
 
+        ky = einops.rearrange(ky, 'b h t d -> h (b t) d').unsqueeze(0)
         k = torch.cat([kx, ky], dim=2)
-        v = torch.cat([vx, vy], dim=2)
-
-        q = q.view(B, self.num_heads, -1, C // self.num_heads)  # B, H, N, Hc
-        k = k.view(B, self.num_heads, -1, C // self.num_heads).contiguous()  # B, H, N, Hc
-        v = v.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
-
-        x = attention(q, k, v)
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
         
-        # Extract attention maps if requested
-        attention_maps = None
-        # TODO: different configurations for cross attenion, how about self-attention?
-        attention_tuples = bulid_cross_attention_tuples(q, k, v, ky, vy)
-        mixed_attention_maps_list = []
-        if extra_dict["save_maps"] or eval_mode:
-            kx_reshaped = kx.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
-            
-            # Self-attention: q vs kx
-            self_attn_scores = torch.matmul(q, kx_reshaped.transpose(-2, -1)) * self.scale
-            self_attn_maps = torch.softmax(self_attn_scores, dim=-1).mean(dim=1)
-            
-            # Cross-attention
-            for label, current_q, current_k in attention_tuples:
-                cross_attn_scores = torch.matmul(current_q, current_k.transpose(-2, -1)) * self.scale
-                cross_attn_maps = torch.softmax(cross_attn_scores, dim=-1).mean(dim=1)
+        # x = attention(q, k, v)
+        # x = x.transpose(1, 2).reshape(B, N, C)
+        # x = self.proj(x)
+        # x = self.proj_drop(x)
+        
+        scale_factor = 1 / math.sqrt(q.size(-1))
+        attn_map = q @ k.transpose(-2, -1) * scale_factor
+        self_attn_maps, cross_attn_maps = Attention.softmax_for_each_prompt(attn_map, no_prompts)
+        
+        uncond_maps = cross_attn_maps[:, :, -1].unsqueeze(-1).contiguous()
 
-                mixed_attention_maps = torch.zeros(self_attn_maps.shape[0:-1], device=local_config.device)
-                cross_attn_maps_target_token = cross_attn_maps[:, :, 3] # TODO: better way than just selection 3?
-                for b_idx in range(mixed_attention_maps.shape[0]):
-                    for attn_idx in range(mixed_attention_maps.shape[1]):
-                        mixed_attention_maps[b_idx] += cross_attn_maps_target_token[b_idx, attn_idx] * self_attn_maps[b_idx, attn_idx]
-                mixed_attention_maps = torch.softmax(mixed_attention_maps, dim=1)
-                mixed_attention_maps_list.append(mixed_attention_maps)
-                # Save attention maps as images if directory is provided
-                if attention_maps_dir is not None:
-                    self._save_attention_maps_as_images(self_attn_maps, cross_attn_maps, mixed_attention_maps, attention_maps_dir, label, img_h, img_w,
-                                                        extra_dict=extra_dict)
+        aggregated = self.aggregate_attn_maps(
+            self.aggregate_heads(self.apply_projection(self.get_projection(uncond_maps, img_h, img_w), cross_attn_maps)),
+            self.aggregate_heads(self_attn_maps)
+        ).unsqueeze(0)
 
-        aggregated_attn_maps = torch.stack(mixed_attention_maps_list).mean(dim=0).softmax(dim=-1)
-        return x, aggregated_attn_maps
+        aggregated_attn_maps = torch.softmax(aggregated / local_config.aggregated_maps_softmax_temperature, dim=1)
+        aggregated_attn_maps = torch.matmul(aggregated_attn_maps, self.maps_weighting(aggregated_attn_maps, kx, ky))
+
+        if attention_maps_dir is not None:
+            for i in range(no_prompts):
+                aggregated_slice = aggregated_attn_maps[:, :, i]
+                self._save_attention_maps_as_images(self_attn_maps, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+                                                    extra_dict=extra_dict)
+
+        return torch.zeros(x.shape).to(local_config.device), aggregated_attn_maps
     
-    def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, save_dir, label, img_h=None, img_w=None,
-                                       extra_dict=None):
+    def _save_attention_maps_as_images(self, self_attn_maps, cross_attn_maps, mixed_attention_maps, uncond_attn_maps, save_dir, slice_idx, 
+                                       label, img_h=None, img_w=None, extra_dict=None):
         """
         Save attention maps as images to specified directory.
         
@@ -133,7 +277,7 @@ class Attention(nn.Module):
         """
         # Create directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
-        prompt_class = extra_dict["prompt"].split(" ")[4]
+        prompt_class = extra_dict["prompts"][slice_idx].split(" ")[4]
         # Determine spatial dimensions
         N = self_attn_maps.shape[1]
         if img_h is None or img_w is None:
@@ -142,7 +286,7 @@ class Attention(nn.Module):
             img_h, img_w = spatial_size, spatial_size
         
         # Save cross-attention maps
-        cross_attn_np = cross_attn_maps.cpu().detach().numpy()[:,:,3]
+        cross_attn_np = cross_attn_maps.cpu().detach().numpy()
         for b in range(cross_attn_np.shape[0]):
             # shape (N, M) - reshape query dimension to spatial
             attn_map = cross_attn_np[b]  # shape (N, M)
@@ -157,29 +301,10 @@ class Attention(nn.Module):
             ax.set_ylabel('Image Height')
             plt.colorbar(im, ax=ax)
             
-            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
+            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_{prompt_class}_{label}_{b}.png')
             plt.savefig(save_path, dpi=100, bbox_inches='tight')
             plt.close(fig)
 
-        # Save mixed attention maps
-        mixed_attention_np = mixed_attention_maps.cpu().detach().numpy()
-        for b in range(mixed_attention_np.shape[0]):
-            # shape (N, M) - reshape query dimension to spatial
-            attn_map = mixed_attention_np[b]  # shape (N, M)
-            attn_spatial = attn_map.reshape(img_h, img_w, -1)
-            # Average over text tokens (last dimension)
-            attn_spatial_avg = attn_spatial.mean(axis=2)
-            
-            fig, ax = plt.subplots(figsize=(img_w, img_h))
-            im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
-            ax.set_title(f'Mixed-Attention - Batch {b}')
-            ax.set_xlabel('Image Width')
-            ax.set_ylabel('Image Height')
-            plt.colorbar(im, ax=ax)
-            
-            save_path = os.path.join(save_dir, f'mixed_attn_img{extra_dict["img_id"]}_b{b}_{label}_{prompt_class}.png')
-            plt.savefig(save_path, bbox_inches='tight')
-            plt.close(fig)
 
 class FlattenDiTBlock(nn.Module):
     def __init__(self, hidden_size, groups,  mlp_ratio=4, ):
@@ -528,16 +653,17 @@ class PixNerDiT(nn.Module):
     def forward(self, x, t, y, extra_dict=None):
         B, _, H, W = x.shape
         eval_mode = extra_dict["eval_mode"]
-
+        prompts_count = y.shape[0]//2
+        y = y[prompts_count:]
         x = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         ypos = self.y_pos_embedding
         t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(B, -1, self.hidden_size) + ypos.to(y.dtype)
+        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
 
         # TODO: remove the uncodition dims
         x = x[1].unsqueeze(0)
-        y = y[1].unsqueeze(0)
+        # y = y[0].unsqueeze(0)
         t = t[1].unsqueeze(0)
 
         condition = nn.functional.silu(t)
@@ -555,7 +681,7 @@ class PixNerDiT(nn.Module):
                 # TODO
                 if i == local_config.dit_blocks - 1:
                     maps = torch.stack(maps_array).mean(dim=0)
-                    return maps.reshape(x.shape[0], H//self.patch_size, W//self.patch_size)
+                    return einops.rearrange(maps[0], "p b -> b p").reshape(prompts_count, H//self.patch_size, W//self.patch_size).repeat(2, 1, 1)
 
         s = torch.nn.functional.silu(t + s)
         batch_size, length, _ = s.shape
@@ -572,4 +698,4 @@ class PixNerDiT(nn.Module):
                                      (H, W),
                                      kernel_size=self.patch_size,
                                      stride=self.patch_size)
-        return x
+        return x.repeat(B, 1, 1, 1)

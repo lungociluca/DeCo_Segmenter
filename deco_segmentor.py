@@ -168,7 +168,7 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        condition, uncondition = self.conditioner([y,]*num_images, {"negative_prompt": neg_prompt})
+        condition, uncondition = self.conditioner(y)
         attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, extra_dict=extra_dict)
         return attention_maps[1]
     
@@ -227,10 +227,10 @@ class DeCoSegmentor(torch.nn.Module):
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
         return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
 
-    def call_with_defaults(self, x, prompt, extra_dict):
+    def call_with_defaults(self, x, prompts, extra_dict):
         return self.pipeline(
             x,
-            prompt,
+            prompts,
             local_config.neg_label,
             local_config.num_images,
             local_config.image_height,
@@ -247,43 +247,27 @@ class DeCoSegmentor(torch.nn.Module):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = DeCoSegmentor.get_gt_shape(x)
-        prompt_format = "a picture of a {target} and other objects, rest of the scene"
+        prompt_format = "a photo of a {target} whitin a complex scene"
         prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         # 0.00002 too little
         prediction[0] += local_config.background_threshold
 
-        # TODO: switch order of interpolate and argmax?
-        for label_idx, label in gt_idxs_and_labels:
-            prompt = prompt_format.format(target=label)
-            print(self.idx, "LABEL", label)
-            extra_dict = {
-                "prompt": prompt,
-                "eval_mode": local_config.eval,
-                "img_id": self.idx
-            }
-            
-            attention_maps = self.call_with_defaults(image_tensor, prompt, extra_dict)
-            # select slice corresponding to positive prompt
-            attention_maps = attention_maps[0].unsqueeze(0).unsqueeze(0)
-            resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(0).squeeze(0)
-            prediction[label_idx.item()] += resized_map
-
-            # DeCoSegmentor.save_attn_map(resized_map, label)
-
-        # class_prediction = np.argmax(prediction.detach().cpu().numpy(), axis=0).astype(np.uint8)
-
-        # img_array = (image_tensor.cpu().numpy()).astype(np.uint8).transpose(1, 2, 0)
-        # Image.fromarray(img_array).save(f"z_output/{self.idx}_input_image.png")
+        prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels] + [local_config.neg_label]
+        extra_dict = {
+            "prompts": prompts,
+            "eval_mode": local_config.eval,
+            "img_id": self.idx
+        }
         
-        # # Save class_prediction as heatmap
-        # plt.figure()
-        # plt.imshow(class_prediction, cmap='viridis')
-        # plt.colorbar(label='Class Index')
-        # plt.title('Class Prediction')
-        # plt.axis('off')
-        # plt.savefig(f"z_output/{self.idx}_class_prediction_heatmap.png")
-        # plt.close()
+        attention_maps = self.call_with_defaults(image_tensor, prompts, extra_dict)
+        # select slice corresponding to positive prompt
+        attention_maps = attention_maps[attention_maps.shape[0]//2:-1].unsqueeze(1)
+        resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(1)
+        
+        for i, label_and_idx in enumerate(gt_idxs_and_labels):
+            label_idx = label_and_idx[0]
+            prediction[label_idx.item()] += resized_map[i]
 
         visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
                              self.categs,
