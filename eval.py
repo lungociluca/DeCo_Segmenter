@@ -19,7 +19,8 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, launch
 from detectron2.evaluation import CityscapesInstanceEvaluator, CityscapesSemSegEvaluator, \
-    SemSegEvaluator, COCOEvaluator, COCOPanopticEvaluator, DatasetEvaluators, verify_results
+    SemSegEvaluator, COCOEvaluator, COCOPanopticEvaluator, DatasetEvaluators, verify_results, \
+    PascalVOCDetectionEvaluator
 
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.utils.logger import setup_logger
@@ -40,6 +41,7 @@ import config as local_config
 from cat_seg_conf import add_cat_seg_config
 
 from detectron2.data import MetadataCatalog
+from register_pascal_20 import register_all_pascal_voc
 
 class VOCbEvaluator(SemSegEvaluator):
     """
@@ -57,10 +59,10 @@ class VOCbEvaluator(SemSegEvaluator):
         """
         for input, output in zip(inputs, outputs):
             output = output["sem_seg"].argmax(dim=0).to(self._cpu_device)
-            pred = np.array(output, dtype=np.int)
+            pred = np.array(output, dtype=int)
             pred[pred >= 20] = 20
             with PathManager.open(self.input_file_to_gt_file[input["file_name"]], "rb") as f:
-                gt = np.array(Image.open(f), dtype=np.int)
+                gt = np.array(Image.open(f), dtype=int)
 
             gt[gt == self._ignore_label] = self._num_classes
 
@@ -239,6 +241,7 @@ def setup(args):
     """
     Create configs and perform basic setups.
     """
+    # register_all_pascal_voc(os.getenv("DETECTRON2_DATASETS", "datasets"))
     cfg = get_cfg()
     # for poly lr schedule
     add_deeplab_config(cfg)

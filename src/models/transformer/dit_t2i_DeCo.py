@@ -121,10 +121,7 @@ class Attention(nn.Module):
         
         for i in range(no_prompts):
             cross_attn_maps_list.append(
-                torch.softmax(
-                    attn_map[:, :, :, image_patches + i * text_patches + local_config.idx_token_of_interest] / local_config.cross_attn_softmax_temperature, 
-                    dim=-1
-                )
+                attn_map[:, :, :, 0 + i * text_patches + local_config.idx_token_of_interest], 
             )
         return self_attn_maps[0], torch.stack(cross_attn_maps_list, dim=-1)[0].contiguous()
 
@@ -293,45 +290,34 @@ class Attention(nn.Module):
         no_prompts = y.shape[0]
         # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
+        q = qkv_x[0]
         q = self.q_norm(q.contiguous())
-        kx = self.k_norm(kx.contiguous())
-        q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
-        
+
         # PROMPT PROJECTIONS
         kv_y = self.kv_y(y).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        ky, vy = kv_y[0], kv_y[1]
+        ky = kv_y[0]
         ky = self.k_norm(ky.contiguous())
 
-        # TODO: Should check if valid for downstream dit blocks
-        ky = einops.rearrange(ky, 'b h t d -> h (b t) d').unsqueeze(0)
-        k = torch.cat([kx, ky], dim=2)
+        ky = ky[:, :, local_config.idx_token_of_interest, :].unsqueeze(2)
+        print('q', q.shape, 'ky', ky.shape)
+        # ky = einops.rearrange(ky, 'b h t d -> h (b t) d').unsqueeze(0)
         
-        # x = attention(q, k, v)
-        # x = x.transpose(1, 2).reshape(B, N, C)
-        # x = self.proj(x)
-        # x = self.proj_drop(x)
+        cross_attn_maps = q @ ky.transpose(-2, -1)
+        aggregated_attn_maps = cross_attn_maps.mean(1).squeeze(-1)
+        print("aggregated", aggregated_attn_maps.shape)        
+
+        aggregated_attn_maps = torch.softmax(aggregated_attn_maps / local_config.cross_attn_softmax_temperature, dim=1)
+        aggregated_attn_maps = aggregated_attn_maps - aggregated_attn_maps[-1]
+        th_func = torch.nn.Threshold(0.0, 0.0)
+        aggregated_attn_maps = th_func(aggregated_attn_maps)
+
+        aggregated_attn_maps = (aggregated_attn_maps - aggregated_attn_maps.min()) / (aggregated_attn_maps.max() - aggregated_attn_maps.min())
+        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p -> p b').unsqueeze(0)
         
-        scale_factor = 1 / math.sqrt(q.size(-1))
-        attn_map = q @ k.transpose(-2, -1) * scale_factor
-        self_attn_maps, cross_attn_maps = Attention.softmax_for_each_prompt(attn_map, no_prompts)
-        
-        uncond_maps = cross_attn_maps[:, :, -1].unsqueeze(-1).contiguous()
-
-        aggregated = self.aggregate_attn_maps(
-            self.aggregate_heads(self.apply_projection(self.get_projection(uncond_maps, img_h, img_w), cross_attn_maps)),
-            self.aggregate_heads(self_attn_maps)
-        ).unsqueeze(0)
-
-        aggregated_attn_maps = einops.rearrange(aggregated, "b p c -> b (p c)")
-        aggregated_attn_maps = aggregated_attn_maps / aggregated_attn_maps.max()
-        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, " b (p c) -> b p c", p=N)
-        aggregated_attn_maps = torch.matmul(aggregated_attn_maps, self.maps_weighting(aggregated_attn_maps, kx, ky))
-
         if attention_maps_dir is not None:
             for i in range(no_prompts):
                 aggregated_slice = aggregated_attn_maps[:, :, i]
-                self._save_attention_maps_as_images(self_attn_maps, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
                                                     extra_dict=extra_dict)                
         return torch.zeros(x.shape).to(local_config.device), aggregated_attn_maps
     
@@ -359,7 +345,7 @@ class Attention(nn.Module):
         """
         # Create directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
-        prompt_class = extra_dict["prompts"][slice_idx].split(" ")[4]
+        prompt_class = extra_dict["prompts"][slice_idx].split(" ")[local_config.idx_token_of_interest]
         # Determine spatial dimensions
         N = self_attn_maps.shape[1]
         if img_h is None or img_w is None:
@@ -693,18 +679,18 @@ class PixNerDiT(nn.Module):
         )
 
         self.blocks = nn.ModuleList([
-            FlattenDiTBlock(self.hidden_size, self.num_groups) for _ in range(self.num_encoder_blocks)
+            FlattenDiTBlock(self.hidden_size, self.num_groups) for _ in range(1)
         ])
         
-        self.dec_net = SimpleMLPAdaLN(
-            in_channels=self.decoder_hidden_size,
-            model_channels=self.decoder_hidden_size,
-            out_channels=self.in_channels,  # for vlb loss
-            z_channels=self.hidden_size,
-            num_res_blocks=self.num_decoder_blocks,
-            patch_size=self.patch_size,
-            grad_checkpointing=False
-        )
+        # self.dec_net = SimpleMLPAdaLN(
+        #     in_channels=self.decoder_hidden_size,
+        #     model_channels=self.decoder_hidden_size,
+        #     out_channels=self.in_channels,  # for vlb loss
+        #     z_channels=self.hidden_size,
+        #     num_res_blocks=self.num_decoder_blocks,
+        #     patch_size=self.patch_size,
+        #     grad_checkpointing=False
+        # )
 
         self.text_refine_blocks = nn.ModuleList([
             TextRefineBlock(self.hidden_size, self.num_groups) for _ in range(self.num_text_blocks)
@@ -764,20 +750,20 @@ class PixNerDiT(nn.Module):
                 if i == local_config.dit_blocks - 1:
                     maps = torch.stack(maps_array).mean(dim=0)
                     return einops.rearrange(maps[0], "p b -> b p").reshape(prompts_count, H//self.patch_size, W//self.patch_size).repeat(2, 1, 1)
+                
+        # s = torch.nn.functional.silu(t + s)
+        # batch_size, length, _ = s.shape
+        # x = x.reshape(batch_size * length, self.in_channels, self.patch_size ** 2 )
+        # x = x.transpose(1, 2)
+        # s = s.view(batch_size * length, self.hidden_size)
+        # x = self.x_embedder(x)
 
-        s = torch.nn.functional.silu(t + s)
-        batch_size, length, _ = s.shape
-        x = x.reshape(batch_size * length, self.in_channels, self.patch_size ** 2 )
-        x = x.transpose(1, 2)
-        s = s.view(batch_size * length, self.hidden_size)
-        x = self.x_embedder(x)
-
-        x = self.dec_net(x, s)
+        # x = self.dec_net(x, s)
         
-        x = x.transpose(1, 2)
-        x = x.reshape(batch_size, length, -1)
-        x = torch.nn.functional.fold(x.transpose(1, 2).contiguous(),
-                                     (H, W),
-                                     kernel_size=self.patch_size,
-                                     stride=self.patch_size)
-        return x.repeat(B, 1, 1, 1)
+        # x = x.transpose(1, 2)
+        # x = x.reshape(batch_size, length, -1)
+        # x = torch.nn.functional.fold(x.transpose(1, 2).contiguous(),
+        #                              (H, W),
+        #                              kernel_size=self.patch_size,
+        #                              stride=self.patch_size)
+        # return x.repeat(B, 1, 1, 1)

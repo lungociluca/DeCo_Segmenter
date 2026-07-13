@@ -20,6 +20,14 @@ class AttentionMapsProjection(Enum):
     NO_OP = "no-op"
     ORTHOGONAL_TO_PRINCIPAL_COMP = "orthogonal_to_principal_components"
 
+class MapsWeighting(Enum):
+    NO_OP = "no-op"
+    POOLING_OVER_COS_SIMILARITY = "pool_cos_similiarity"
+
+class ForwardMethod(Enum):
+    ATTENTION = "attention"
+    COSINE_SIMILARITY = "cosine_similarity"
+
 device = "mps"
 
 out_image_path = "out.jpg"
@@ -44,6 +52,7 @@ idx_token_of_interest = 3
 dit_blocks = 1
 background_threshold = 0.0004
 unbiasing_components_count = 2
+gt_file_extention = "jpg"
 
 self_attn_softmax_temperature = 0.7
 cross_attn_softmax_temperature = 100
@@ -55,3 +64,5 @@ cross_attention_types: List[CrossAttnType] = [
 attention_aggregate_method: AttentionAggregateMethod = AttentionAggregateMethod.MERGE_WITH_SELF_ATTN
 head_aggregate_method: HeadAggregateMethod = HeadAggregateMethod.MEAN
 attention_map_projection: AttentionMapsProjection = AttentionMapsProjection.NO_OP
+maps_weighting: MapsWeighting = MapsWeighting.NO_OP
+forward_method: ForwardMethod = ForwardMethod.ATTENTION

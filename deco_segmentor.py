@@ -13,6 +13,7 @@ from PIL import Image
 import numpy as np
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import scipy.io as sio
 
 import config as local_config
 
@@ -117,6 +118,7 @@ def visualize_prediction(image, predictions, class_names, file_id, alpha=0.6):
     plt.tight_layout()
     # TODO
     plt.savefig(f"z_output/{file_id}.png")
+    plt.close()
 
 
 def instantiate_class(config):
@@ -137,7 +139,7 @@ def load_model(weight_dict, denoiser):
 
 class Pipeline:
     def __init__(self, vae, denoiser, conditioner, resolution, device, num_steps, guidance, timeshift, order, save_maps=False):
-        self.vae = vae.to(device)
+        # self.vae = vae.to(device)
         self.denoiser = denoiser.to(device)
         self.conditioner = conditioner.to(device)
         self.conditioner.compile()
@@ -187,11 +189,11 @@ class DeCoSegmentor(torch.nn.Module):
 
         config_path = "./configs_t2i/sft_res512.yaml"
         config = OmegaConf.load(config_path)
-        vae_config = config.model.vae
+        # vae_config = config.model.vae
         denoiser_config = config.model.denoiser
         conditioner_config = config.model.conditioner
 
-        vae = instantiate_class(vae_config)
+        # vae = instantiate_class(vae_config)
         denoiser = instantiate_class(denoiser_config)
         conditioner = instantiate_class(conditioner_config)
 
@@ -199,33 +201,43 @@ class DeCoSegmentor(torch.nn.Module):
         ckpt = torch.load(ckpt_path, map_location="cpu")
         denoiser = load_model(ckpt, denoiser)
         denoiser = denoiser.to(local_config.device)
-        vae = vae.to(local_config.device)
+        # vae = vae.to(local_config.device)
         denoiser.eval()
 
         #TODO delete
         self.idx = 0
         import json
-        with open('catseg_configs/ade150.json') as f:
-            self.categs = ["background"] + json.load(f)
+        self.dataset_config = local_config.datasets[local_config.eval_dataset]
+        with open(self.dataset_config["json"]) as f:
+            self.categs = json.load(f)
+        if local_config.eval_dataset == local_config.EvalDatasets.VOC12:
+            self.categs = ["background"] + self.categs
+        else:
+            self.categs = ["background"] + self.categs
         self.categs_count = len(self.categs)
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
-        self.pipeline = Pipeline(vae, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
+        self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps)
 
-    @staticmethod
-    def get_gt_shape(x):
-        gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
+    def get_gt_shape(self, x):
+        gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
+            .replace(".jpg", self.dataset_config["extention"])
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
         return mask_tensor.shape
     
     def get_gt_labels(self, x):
-        gt_file_path = x[0]['file_name'].replace("images", "annotations").replace(".jpg", ".png")
+        gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
+            .replace(".jpg", self.dataset_config["extention"])
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if i > 0]
+        if local_config.eval_dataset == local_config.EvalDatasets.VOC12:
+            filter_condition = lambda idx: idx > 0 and idx < 255
+        else:
+            filter_condition = lambda idx: idx > 0 # TODO: check for ade150
+        return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if filter_condition(i)]
 
     def call_with_defaults(self, x, prompts, extra_dict):
         return self.pipeline(
@@ -241,17 +253,29 @@ class DeCoSegmentor(torch.nn.Module):
     @staticmethod
     def resize_maps(attention_maps, new_shape):
         return F.interpolate(attention_maps, new_shape, mode="bilinear", align_corners=False)
+    
+    def postprocess_voc12(self, prediction):
+        # final_prediction = torch.zeros((C, H, W),dtype=prediction.dtype).to(prediction.device)
+        # for i in range(1, C):
+        #     final_prediction[i-1] += prediction[i]
+        # final_prediction[-1] += prediction[0]
+        # return final_prediction
+        return prediction[1:, :, :] # TODO: check
+    
+    def postprocess_ade150(self, prediction):
+        return prediction[1:, :, :] # TODO: check
 
     @torch.no_grad()
     def forward_no_grad(self, x):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
-        gt_shape = DeCoSegmentor.get_gt_shape(x)
-        prompt_format = "a photo of a {target} whitin a complex scene"
-        prediction = torch.zeros((self.categs_count+1, gt_shape[-2], gt_shape[-1])).to(local_config.device)
+        gt_shape = self.get_gt_shape(x)
+        prompt_format = "Ignore all the objects in the picture, prioritize the following object: {target}"
+        # TODO: was a +1: len of categs+1
+        prediction = torch.zeros((self.categs_count, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
-        # 0.00002 too little
-        prediction[0] += local_config.background_threshold
+        background_idx = 0
+        prediction[background_idx] += local_config.background_threshold
 
         prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels] + [local_config.neg_label]
         extra_dict = {
@@ -264,6 +288,15 @@ class DeCoSegmentor(torch.nn.Module):
         # select slice corresponding to positive prompt
         attention_maps = attention_maps[attention_maps.shape[0]//2:-1].unsqueeze(1)
         resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(1)
+
+        cam_dict = {}
+        for i, label_and_idx in enumerate(gt_idxs_and_labels):
+            image_label = label_and_idx[0].item() - 1
+            cam_dict[str(image_label)] = (resized_map[i] * 255).cpu().numpy()
+        
+        get_fid = lambda x: x.split('/')[-1].replace('.jpg', '')
+        save_path = os.path.join("sio_maps", "images", f'{get_fid(x[0]["file_name"])}.mat')
+        sio.savemat(save_path, cam_dict, do_compression=True)
         
         for i, label_and_idx in enumerate(gt_idxs_and_labels):
             label_idx = label_and_idx[0]
@@ -273,7 +306,8 @@ class DeCoSegmentor(torch.nn.Module):
                              self.categs,
                              x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
         self.idx += 1
-        return [{"sem_seg": prediction[1:, :, :]}]
+        postprocess_func = self.postprocess_ade150 if local_config.eval_dataset == local_config.EvalDatasets.ADE150 else self.postprocess_voc12
+        return [{"sem_seg": postprocess_func(prediction)}] # TODO: verify slicing
     
     def forward(self, x):
         return self.forward_no_grad(x)

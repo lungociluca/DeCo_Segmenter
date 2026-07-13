@@ -26,13 +26,25 @@ shift 3
 opts=${@}
 
 #ADE20k-150
+# python eval.py --config $config \
+#  --num-gpus $gpus \
+#  --dist-url "auto" \
+#  --eval-only \
+#  OUTPUT_DIR $output/eval \
+#  MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "catseg_configs/ade150.json" \
+#  DATASETS.TEST \(\"ade20k_sem_seg_val\"\,\) \
+#  TEST.SLIDING_WINDOW "True" \
+#  MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
+#  $opts
+
+ #VOC12
 python eval.py --config $config \
  --num-gpus $gpus \
  --dist-url "auto" \
  --eval-only \
  OUTPUT_DIR $output/eval \
- MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "catseg_configs/ade150.json" \
- DATASETS.TEST \(\"ade20k_sem_seg_val\"\,\) \
+ MODEL.SEM_SEG_HEAD.TEST_CLASS_JSON "catseg_configs/voc20.json" \
+ DATASETS.TEST \(\"voc_2012_test_sem_seg\"\,\) \
  TEST.SLIDING_WINDOW "True" \
  MODEL.SEM_SEG_HEAD.POOLING_SIZES "[1,1]" \
  $opts
