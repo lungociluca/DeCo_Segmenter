@@ -138,7 +138,7 @@ def load_model(weight_dict, denoiser):
     return denoiser
 
 class Pipeline:
-    def __init__(self, vae, denoiser, conditioner, resolution, device, num_steps, guidance, timeshift, order, save_maps=False):
+    def __init__(self, vae, denoiser, conditioner, resolution, device, num_steps, guidance, timeshift, order, save_maps=False, prompt_format='', labels=[]):
         # self.vae = vae.to(device)
         self.denoiser = denoiser.to(device)
         self.conditioner = conditioner.to(device)
@@ -156,12 +156,21 @@ class Pipeline:
             timeshift=timeshift,
             save_maps=save_maps
         )
+        self.prompt_embeddings = self.compute_prompt_embs(prompt_format, labels)
+        self.conditioner.to("cpu")
 
     def __del__(self):
         self.tmp_dir.cleanup()
 
     @torch.no_grad()
-    def __call__(self, x, y, neg_prompt, num_images, image_height, image_width, extra_dict):
+    def compute_prompt_embs(self, prompt_format, labels):
+        return torch.cat(
+            [self.conditioner(prompt_format.format(target=x))[0] for x in labels],
+            dim=0
+        )
+
+    @torch.no_grad()
+    def __call__(self, x, label_ids, neg_prompt, num_images, image_height, image_width, extra_dict):
         image_height = image_height // 32 * 32 # TODO: related to attention maps resolution ? could get finer maps?
         image_width = image_width // 32 * 32
         self.denoiser.decoder_patch_scaling_h = image_height / 512
@@ -170,8 +179,8 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        condition, uncondition = self.conditioner(y)
-        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, uncondition, extra_dict=extra_dict)
+        condition = torch.stack([self.prompt_embeddings[lidx.item()] for lidx in label_ids], dim=0)
+        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, condition, extra_dict=extra_dict)
         return attention_maps[1]
     
 
@@ -218,8 +227,9 @@ class DeCoSegmentor(torch.nn.Module):
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
+        prompt_format = "Ignore all the objects in the picture, prioritize the following object: {target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
-                                 local_config.timeshift, local_config.order, local_config.save_maps)
+                                 local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
 
     def get_gt_shape(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
@@ -239,10 +249,10 @@ class DeCoSegmentor(torch.nn.Module):
             filter_condition = lambda idx: idx > 0 # TODO: check for ade150
         return [(i, self.categs[i]) for i in torch.unique(mask_tensor).to(torch.uint8) if filter_condition(i)]
 
-    def call_with_defaults(self, x, prompts, extra_dict):
+    def call_with_defaults(self, x, label_ids, extra_dict):
         return self.pipeline(
             x,
-            prompts,
+            label_ids,
             local_config.neg_label,
             local_config.num_images,
             local_config.image_height,
@@ -264,7 +274,7 @@ class DeCoSegmentor(torch.nn.Module):
     
     def postprocess_ade150(self, prediction):
         return prediction[1:, :, :] # TODO: check
-
+    
     @torch.no_grad()
     def forward_no_grad(self, x):
         image_tensor = x[0]["image"]
@@ -277,16 +287,17 @@ class DeCoSegmentor(torch.nn.Module):
         background_idx = 0
         prediction[background_idx] += local_config.background_threshold
 
-        prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels] + [local_config.neg_label]
+        prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels]# + [local_config.neg_label]
+        label_ids = [idx_and_label[0] for idx_and_label in gt_idxs_and_labels]
         extra_dict = {
             "prompts": prompts,
             "eval_mode": local_config.eval,
             "img_id": self.idx
         }
         
-        attention_maps = self.call_with_defaults(image_tensor, prompts, extra_dict)
+        attention_maps = self.call_with_defaults(image_tensor, label_ids, extra_dict)
         # select slice corresponding to positive prompt
-        attention_maps = attention_maps[attention_maps.shape[0]//2:-1].unsqueeze(1)
+        attention_maps = attention_maps.unsqueeze(1)
         resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(1)
 
         cam_dict = {}
