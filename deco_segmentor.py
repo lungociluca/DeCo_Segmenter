@@ -227,7 +227,7 @@ class DeCoSegmentor(torch.nn.Module):
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
-        prompt_format = "Ignore all the objects in the picture, prioritize the following object: {target}"
+        prompt_format = "Photo of a {target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
 
@@ -280,7 +280,7 @@ class DeCoSegmentor(torch.nn.Module):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = self.get_gt_shape(x)
-        prompt_format = "Ignore all the objects in the picture, prioritize the following object: {target}"
+        prompt_format = "Photo of a {target}"
         # TODO: was a +1: len of categs+1
         prediction = torch.zeros((self.categs_count, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold

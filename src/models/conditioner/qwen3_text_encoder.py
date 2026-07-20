@@ -31,6 +31,8 @@ class Qwen3TextEncoder(BaseConditioner):
     def _impl_condition(self, y, metadata:dict={}):
         tokenized = self.tokenizer(y, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
         input_ids = tokenized.input_ids.to(device)
+        # print(input_ids[:,:10])
+        # exit(0)
         attention_mask = tokenized.attention_mask.to(device)
         metadata["valid_length_y"] = torch.sum(attention_mask, dim=-1)
         y = self.model(input_ids=input_ids, attention_mask=attention_mask)[0]

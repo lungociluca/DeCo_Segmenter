@@ -106,6 +106,8 @@ class Attention(nn.Module):
         self.get_projection = set_projection_matrix_computation()
         self.maps_weighting = set_maps_weighting()
 
+        self.unbias_matrix = self.remove_bias()
+
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
         """
@@ -176,28 +178,22 @@ class Attention(nn.Module):
         return basis_mtrx
     
     @staticmethod
-    def remove_bias(kx, kx_noise, debias_mtrx=None):
-        if debias_mtrx is not None:
-            B, H, P, D = kx.shape
-            kx = einops.rearrange(kx, 'b h p d -> h (b p d)')
-            debias = torch.matmul(debias_mtrx, kx)
-            debias = einops.rearrange(debias, 'h (b p d) -> b h p d', b=B, p=P)
-            return debias
-        
-        B, H, P, D = kx_noise.shape
+    def remove_bias():
+        texture_features = torch.load('texture_qs.pth').to(local_config.device)
+        B, H, P, D = texture_features.shape
+        texture_features = einops.rearrange(texture_features, 'b h p d -> (h d) (b p)')
+        print("text features", texture_features.shape)
+        texture_features = texture_features - texture_features.mean()
         basis = torch.linalg.svd(
-            kx_noise,
+            texture_features,
             full_matrices=False
         )[0]
+        print('basis before', basis.shape)
         basis = basis[:, :local_config.unbiasing_components_count].contiguous()
-        basis = einops.rearrange(basis, 'b h p d -> h (b p d)')
-        basis = basis - basis.mean(dim=-1, keepdim=True)
-
-        basis_mtrx = torch.eye(H, dtype=kx_noise.dtype, device=local_config.device) - basis @ basis.T
-        kx = einops.rearrange(kx, 'b h p d -> h (b p d)')
-        debias = torch.matmul(basis_mtrx, kx)
-        debias = einops.rearrange(debias, 'h (b p d) -> b h p d', b=B, d=D)
-        return debias, basis_mtrx
+        print('basis', basis.shape)
+        basis_mtrx = torch.eye(H * D, dtype=texture_features.dtype, device=local_config.device) - basis @ basis.T
+        print('matrix', basis_mtrx.shape)
+        return basis_mtrx.to("cpu")
     
     @staticmethod
     def apply_projection(projection, cross_attn):
@@ -240,7 +236,7 @@ class Attention(nn.Module):
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
         q = self.q_norm(q.contiguous())
         kx = self.k_norm(kx.contiguous())
-        q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
+        # q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
         kv_y = self.kv_y(y).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky, vy = kv_y[0], kv_y[1]
         ky = self.k_norm(ky.contiguous())
@@ -316,6 +312,10 @@ class Attention(nn.Module):
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
         q = self.q_norm(q.contiguous())
+        
+        print(q.dtype, self.unbias_matrix.dtype)
+        q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
+        q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
 
         # PROMPT PROJECTIONS
         kv_y = self.kv_y(y[:, [local_config.idx_token_of_interest], :]).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -336,11 +336,12 @@ class Attention(nn.Module):
         #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
         #                                             extra_dict=extra_dict, idx=t,l=l)
         
-        # if attention_maps_dir is not None:
-        #     for i in range(no_prompts):
-        #         aggregated_slice = aggregated_attn_maps[:, :, i]
-        #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-        #                                             extra_dict=extra_dict,l=l)                
+        if attention_maps_dir is not None:
+            for i in range(no_prompts):
+                aggregated_slice = aggregated_attn_maps[:, :, i]
+                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+                                                    extra_dict=extra_dict,l=l)                
+
         return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
     def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
@@ -749,7 +750,7 @@ class PixNerDiT(nn.Module):
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         ypos = self.y_pos_embedding
         t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
+        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size)# + ypos.to(y.dtype)
 
         condition = nn.functional.silu(t)
         for i, block in enumerate(self.text_refine_blocks):
@@ -766,6 +767,8 @@ class PixNerDiT(nn.Module):
                 # TODO
                 if i == local_config.dit_blocks - 1:
                     maps = torch.stack(maps_array).mean(dim=0)
+                    for i in range(maps.shape[-1]):
+                        maps[:,:,i] = (maps[:, :, i] - maps[:, :, i].min()) / (maps[:, :, i].max() - maps[:, :, i].min())
                     # for pid in range(prompts_count):
                     #     Attention._save_attention_maps_as_images(maps[:,:,pid], maps, maps, maps, attention_maps_dir_format.format(idx=99), pid, "", H // self.patch_size,  img_w=W // self.patch_size,
                     #                                     extra_dict=extra_dict,l=99999990)  
