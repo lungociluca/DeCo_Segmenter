@@ -106,7 +106,7 @@ class Attention(nn.Module):
         self.get_projection = set_projection_matrix_computation()
         self.maps_weighting = set_maps_weighting()
 
-        self.unbias_matrix = self.remove_bias()
+        # self.unbias_matrix = self.remove_bias()
 
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
@@ -307,7 +307,7 @@ class Attention(nn.Module):
     def cluster(self, q, no_centroids):
         H, P, D = q.shape
         q = einops.rearrange(q, "h p d -> p (h d)")
-        centroids = (torch.rand((no_centroids, H * D)).to(q.device) - 0.5) * q.max()
+        centroids = (torch.rand((no_centroids, H * D)).to(q.device) * 2 - 1) * q.max()
 
         # Define the number of iterations
         num_iterations = 400
@@ -455,38 +455,18 @@ class Attention(nn.Module):
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
         q = self.q_norm(q.contiguous())
+        # q = q / torch.nn.functional.normalize(q, dim=-1)
         
-        print(q.dtype, self.unbias_matrix.dtype)
-        q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
-        q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
+        centroids_count = 30
+        orig_img = torch.nn.functional.interpolate(extra_dict["image"].unsqueeze(0), [img_h, img_w], mode='bilinear', align_corners=False).squeeze(0)
 
-        # PROMPT PROJECTIONS
-        kv_y = self.kv_y(y[:, [local_config.idx_token_of_interest], :]).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        ky = kv_y[0]
-        ky = self.k_norm(ky.contiguous())
+        labels = self.cluster(q[0], centroids_count)
+        labels_img = labels.view(img_h, img_w)
         
-        scale = 1 / math.sqrt(q.size(-1))
-        cross_attn_maps = q @ ky.transpose(-2, -1) * scale
-        aggregated_attn_maps = cross_attn_maps.mean(1).squeeze(-1)
+        # weights = 
+        self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), centroids_count, [str(i) for i in range(centroids_count)], f'{extra_dict["img_id"]}_{l}')
+        return self.forward_orig(x, y, pos), labels.unsqueeze(0).unsqueeze(0).repeat(1,1,no_prompts).to(torch.float32)
         
-        for i in range(no_prompts):
-            aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
-        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p-> p b').unsqueeze(0)
-        
-        # for t in range(15):
-        #     for i in range(no_prompts):
-        #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
-        #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-        #                                             extra_dict=extra_dict, idx=t,l=l)
-        
-        if attention_maps_dir is not None:
-            for i in range(no_prompts):
-                aggregated_slice = aggregated_attn_maps[:, :, i]
-                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-                                                    extra_dict=extra_dict,l=l)                
-
-        return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
-    
     def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
         config_forward_method: local_config.ForwardMethod = local_config.forward_method

@@ -296,7 +296,7 @@ class DeCoSegmentor(torch.nn.Module):
             "img_id": self.idx,
             "image": image_tensor
         }
-        
+        label_ids = [idx_and_label[0] for idx_and_label in gt_idxs_and_labels]
         attention_maps = self.call_with_defaults(image_tensor, label_ids, extra_dict)
         # select slice corresponding to positive prompt
         attention_maps = attention_maps[attention_maps.shape[0]//2:].unsqueeze(1)
