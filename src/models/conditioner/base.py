@@ -16,12 +16,12 @@ class BaseConditioner(nn.Module):
     @torch.autocast("cuda", dtype=torch.bfloat16)
     def __call__(self, y, metadata:dict={}):
         condition = self._impl_condition(y, metadata)
-        uncondition = self._impl_uncondition(y, metadata)
-        if condition.dtype in [torch.float64, torch.float32, torch.float16]:
-            condition = condition.to(torch.bfloat16)
-        if uncondition.dtype in [torch.float64,torch.float32, torch.float16]:
-            uncondition = uncondition.to(torch.bfloat16)
-        return condition, uncondition
+        # uncondition = self._impl_uncondition(y, metadata)
+        # if condition.dtype in [torch.float64, torch.float32, torch.float16]:
+        #     condition = condition.to(torch.bfloat16)
+        # if uncondition.dtype in [torch.float64,torch.float32, torch.float16]:
+        #     uncondition = uncondition.to(torch.bfloat16)
+        return condition, condition
 
 
 class ComposeConditioner(BaseConditioner):

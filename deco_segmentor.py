@@ -164,8 +164,9 @@ class Pipeline:
 
     @torch.no_grad()
     def compute_prompt_embs(self, prompt_format, labels):
+        print('labels', labels)
         return torch.cat(
-            [self.conditioner(prompt_format.format(target=x))[0] for x in labels],
+            [self.conditioner(prompt_format.format(prep="an" if x[0] in "aeiou" else "a", target=x))[0] for x in labels],
             dim=0
         )
 
@@ -179,6 +180,7 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
+        print("label-->", [lidx.item() for lidx in label_ids])
         condition = torch.stack([self.prompt_embeddings[lidx.item()] for lidx in label_ids], dim=0)
         attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, condition, extra_dict=extra_dict)
         return attention_maps[1]
@@ -227,7 +229,7 @@ class DeCoSegmentor(torch.nn.Module):
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
-        prompt_format = "Photo of a {target}"
+        prompt_format = "Keep the image the same but change only the {target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
 
@@ -280,14 +282,14 @@ class DeCoSegmentor(torch.nn.Module):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = self.get_gt_shape(x)
-        prompt_format = "Photo of a {target}"
+        prompt_format = "The image depicts {prep} {target}"
         # TODO: was a +1: len of categs+1
         prediction = torch.zeros((self.categs_count, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         background_idx = 0
         prediction[background_idx] += local_config.background_threshold
 
-        prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels]# + [local_config.neg_label]
+        prompts = [prompt_format.format(prep="an" if idx_and_label[1][0] in "aeiou" else "a", target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels]# + [local_config.neg_label]
         label_ids = [idx_and_label[0] for idx_and_label in gt_idxs_and_labels]
         extra_dict = {
             "prompts": prompts,
