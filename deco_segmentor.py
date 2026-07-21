@@ -282,24 +282,24 @@ class DeCoSegmentor(torch.nn.Module):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
         gt_shape = self.get_gt_shape(x)
-        prompt_format = "The image depicts {prep} {target}"
+        prompt_format = "Generate a {target}"
         # TODO: was a +1: len of categs+1
         prediction = torch.zeros((self.categs_count, gt_shape[-2], gt_shape[-1])).to(local_config.device)
         # init background score TODO: do not hardcode treshold
         background_idx = 0
         prediction[background_idx] += local_config.background_threshold
 
-        prompts = [prompt_format.format(prep="an" if idx_and_label[1][0] in "aeiou" else "a", target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels]# + [local_config.neg_label]
-        label_ids = [idx_and_label[0] for idx_and_label in gt_idxs_and_labels]
+        prompts = [prompt_format.format(target=idx_and_label[1]) for idx_and_label in gt_idxs_and_labels]# + [local_config.neg_label]
         extra_dict = {
             "prompts": prompts,
             "eval_mode": local_config.eval,
-            "img_id": self.idx
+            "img_id": self.idx,
+            "image": image_tensor
         }
         
         attention_maps = self.call_with_defaults(image_tensor, label_ids, extra_dict)
         # select slice corresponding to positive prompt
-        attention_maps = attention_maps.unsqueeze(1)
+        attention_maps = attention_maps[attention_maps.shape[0]//2:].unsqueeze(1)
         resized_map = DeCoSegmentor.resize_maps(attention_maps, gt_shape[1:]).squeeze(1)
 
         cam_dict = {}

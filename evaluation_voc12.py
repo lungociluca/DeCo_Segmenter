@@ -197,7 +197,7 @@ def save_sample_segmentations(args):
 
 
 class Args:
-    val_split = 0.5
+    val_split = 0.1
     comment='train1464'
     curve=True
     end=70
