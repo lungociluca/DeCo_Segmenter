@@ -29,21 +29,21 @@ class Qwen3TextEncoder(BaseConditioner):
         # torch._dynamo.config.optimize_ddp = False
 
     def _impl_condition(self, y, metadata:dict={}):
-        if "cow" in y:
-            y = y + " cow"
         tokenized = self.tokenizer(y, truncation=True, max_length=self.max_length, padding="max_length", return_tensors="pt")
 
         input_ids = tokenized.input_ids.to(device)
-        print(input_ids[:,:10], y)
+        print(input_ids[:,:13], y)
         # exit(0)
         attention_mask = tokenized.attention_mask.to(device)
+        print("tok len", torch.sum(attention_mask))
+
         metadata["valid_length_y"] = torch.sum(attention_mask, dim=-1)
         y = self.model(input_ids=input_ids, attention_mask=attention_mask)[0]
         if y.shape[2] < self.embed_dim:
             y = torch.cat([y, torch.zeros(y.shape[0], y.shape[1], self.embed_dim - y.shape[2]).to(y.device, y.dtype)], dim=-1)
         if y.shape[2] > self.embed_dim:
             y = y[:, :, :self.embed_dim]
-        return y
+        return y, torch.sum(attention_mask) - 1
 
     def _impl_uncondition(self, y, metadata:dict=None):
         if self.uncondition_embedding is not None and "negative_prompt" not in metadata:

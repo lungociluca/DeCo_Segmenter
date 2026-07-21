@@ -10,7 +10,7 @@ class WrapperAdamLMSampler(AdamLMSampler):
         super().__init__(order=order, scheduler=scheduler, guidance_fn=guidance_fn, num_steps=num_steps, 
                          guidance=guidance, timeshift=timeshift, save_maps=save_maps)
 
-    def _impl_sampling(self, net, noise, condition, uncondition, extra_dict=None):
+    def _impl_sampling(self, net, noise, condition, uncondition, token_lengths, extra_dict=None):
         batch_size = noise.shape[0]
         cfg_condition = condition
         x = noise
@@ -21,5 +21,5 @@ class WrapperAdamLMSampler(AdamLMSampler):
             cfg_condition = cfg_condition.to(torch.float32)
             copy_extra_dict = copy.deepcopy(extra_dict)
             copy_extra_dict["save_maps"] = self.save_maps and i==self.num_steps-1
-            attention_maps = net(cfg_x, cfg_t, cfg_condition, extra_dict=copy_extra_dict)
+            attention_maps = net(cfg_x, cfg_t, cfg_condition, token_lengths, extra_dict=copy_extra_dict)
         return attention_maps, attention_maps

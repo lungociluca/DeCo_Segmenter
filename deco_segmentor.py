@@ -147,6 +147,8 @@ class Pipeline:
         self.tmp_dir = tempfile.TemporaryDirectory(prefix="traj_gifs_")
         # self.denoiser.compile()
 
+        self.prompt_embeddings, self.token_lenghts = self.compute_prompt_embs(prompt_format, labels)
+
         self.diffusion_sampler = WrapperAdamLMSampler(
             order=order,
             scheduler=LinearScheduler(),
@@ -156,7 +158,7 @@ class Pipeline:
             timeshift=timeshift,
             save_maps=save_maps
         )
-        self.prompt_embeddings = self.compute_prompt_embs(prompt_format, labels)
+        
         self.conditioner.to("cpu")
 
     def __del__(self):
@@ -165,10 +167,8 @@ class Pipeline:
     @torch.no_grad()
     def compute_prompt_embs(self, prompt_format, labels):
         print('labels', labels)
-        return torch.cat(
-            [self.conditioner(prompt_format.format(prep="an" if x[0] in "aeiou" else "a", target=x))[0] for x in labels],
-            dim=0
-        )
+        embeddings_and_length_list = [self.conditioner(prompt_format.format(prep="an" if x[0] in "aeiou" else "a", target=x)) for x in labels]
+        return torch.cat([x[0] for x in embeddings_and_length_list],dim=0), [x[1].item() for x in embeddings_and_length_list]
 
     @torch.no_grad()
     def __call__(self, x, label_ids, neg_prompt, num_images, image_height, image_width, extra_dict):
@@ -180,9 +180,10 @@ class Pipeline:
         xT = torch.stack([x] * num_images, dim=0)
         xT = (xT.float() / 127.5) - 1
         xT = xT.to(local_config.device)
-        print("label-->", [lidx.item() for lidx in label_ids])
         condition = torch.stack([self.prompt_embeddings[lidx.item()] for lidx in label_ids], dim=0)
-        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, condition, extra_dict=extra_dict)
+        token_lengths = [self.token_lenghts[lidx.item()] for lidx in label_ids]
+        print('tok', token_lengths)
+        attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, condition, token_lengths, extra_dict=extra_dict)
         return attention_maps[1]
     
 
@@ -222,14 +223,14 @@ class DeCoSegmentor(torch.nn.Module):
         with open(self.dataset_config["json"]) as f:
             self.categs = json.load(f)
         if local_config.eval_dataset == local_config.EvalDatasets.VOC12:
-            self.categs = ["background"] + self.categs
+            self.categs = ["something"] + self.categs
         else:
             self.categs = ["background"] + self.categs
         self.categs_count = len(self.categs)
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
-        prompt_format = "Keep the image the same but change only the {target}"
+        prompt_format = "The image depicts {prep} {target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
 

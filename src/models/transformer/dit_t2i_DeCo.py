@@ -106,7 +106,7 @@ class Attention(nn.Module):
         self.get_projection = set_projection_matrix_computation()
         self.maps_weighting = set_maps_weighting()
 
-        self.unbias_matrix = self.remove_bias()
+        # self.unbias_matrix = self.remove_bias()
 
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
@@ -304,7 +304,7 @@ class Attention(nn.Module):
 
         return torch.zeros(x.shape).to(local_config.device), aggregated_attn_maps
     
-    def forward_attention(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
+    def forward_attention(self, x: torch.Tensor, y, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False,l=1000):
         B, N, C = x.shape
         no_prompts = y.shape[0]
@@ -313,12 +313,13 @@ class Attention(nn.Module):
         q = qkv_x[0]
         q = self.q_norm(q.contiguous())
         
-        print(q.dtype, self.unbias_matrix.dtype)
-        q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
-        q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
+        # print(q.dtype, self.unbias_matrix.dtype)
+        # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
+        # q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
 
         # PROMPT PROJECTIONS
-        kv_y = self.kv_y(y[:, [local_config.idx_token_of_interest], :]).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        y = torch.cat([y[[i], 4:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
+        kv_y = self.kv_y(y).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
         ky = self.k_norm(ky.contiguous())
         
@@ -344,11 +345,11 @@ class Attention(nn.Module):
 
         return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
-    def forward(self, x: torch.Tensor, y, pos, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
+    def forward(self, x: torch.Tensor, y, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
         config_forward_method: local_config.ForwardMethod = local_config.forward_method
         if config_forward_method == local_config.ForwardMethod.ATTENTION:
-            return self.forward_attention(x, y, pos, extra_dict, attention_maps_dir, img_h, img_w, eval_mode,l=l)
+            return self.forward_attention(x, y, pos, token_lengths, extra_dict, attention_maps_dir, img_h, img_w, eval_mode,l=l)
         elif config_forward_method == local_config.ForwardMethod.COSINE_SIMILARITY:
             return self.forward_cosine(x, y, pos, extra_dict, attention_maps_dir, img_h, img_w, eval_mode)
         else:
@@ -409,9 +410,9 @@ class FlattenDiTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
-    def forward(self, x, y, c, pos, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
+    def forward(self, x, y, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
+        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
         x = x + gate_msa * x
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x, attn_maps
@@ -741,7 +742,7 @@ class PixNerDiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-    def forward(self, x, t, y, extra_dict=None):
+    def forward(self, x, t, y, token_lengths, extra_dict=None):
         B, _, H, W = x.shape
         eval_mode = extra_dict["eval_mode"]
         prompts_count = y.shape[0]
@@ -760,7 +761,7 @@ class PixNerDiT(nn.Module):
         attention_maps_dir_format = os.path.join(local_config.attention_maps_dir, "{idx}_attn_maps")
         maps_array = []
         for i in range(self.num_encoder_blocks):
-            s, maps = self.blocks[i](s, y, condition, xpos, extra_dict=extra_dict, attn_maps_dir=attention_maps_dir_format.format(idx=i), 
+            s, maps = self.blocks[i](s, y, condition, xpos, token_lengths, extra_dict=extra_dict, attn_maps_dir=attention_maps_dir_format.format(idx=i), 
                                img_h=H // self.patch_size, img_w=W // self.patch_size, l=i)
             if eval_mode:
                 maps_array.append(maps)

@@ -21,7 +21,7 @@ class BaseConditioner(nn.Module):
         #     condition = condition.to(torch.bfloat16)
         # if uncondition.dtype in [torch.float64,torch.float32, torch.float16]:
         #     uncondition = uncondition.to(torch.bfloat16)
-        return condition, condition
+        return condition
 
 
 class ComposeConditioner(BaseConditioner):
