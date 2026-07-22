@@ -14,7 +14,7 @@ class WrapperAdamLMSampler(AdamLMSampler):
         batch_size = noise.shape[0]
         cfg_condition = condition
         x = noise
-        t_cur = torch.zeros([batch_size,]).to(noise.device, noise.dtype)
+        t_cur = torch.zeros([batch_size,]).to(noise.device, noise.dtype) + self.timedeltas[-1]
         for i  in range(self.num_steps-1, self.num_steps):
             cfg_x = x
             cfg_t = t_cur

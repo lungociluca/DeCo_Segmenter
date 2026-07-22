@@ -167,7 +167,7 @@ class Pipeline:
     @torch.no_grad()
     def compute_prompt_embs(self, prompt_format, labels):
         print('labels', labels)
-        embeddings_and_length_list = [self.conditioner(prompt_format.format(prep="an" if x[0] in "aeiou" else "a", target=x)) for x in labels]
+        embeddings_and_length_list = [self.conditioner(prompt_format.format(prep="an" if x[0] in "aeiou" else "a", target=x) if x != "something" else "The image depicts a something") for x in labels]
         return torch.cat([x[0] for x in embeddings_and_length_list],dim=0), [x[1].item() for x in embeddings_and_length_list]
 
     @torch.no_grad()
@@ -182,7 +182,6 @@ class Pipeline:
         xT = xT.to(local_config.device)
         condition = torch.stack([self.prompt_embeddings[lidx.item()] for lidx in label_ids], dim=0)
         token_lengths = [self.token_lenghts[lidx.item()] for lidx in label_ids]
-        print('tok', token_lengths)
         attention_maps = self.diffusion_sampler(self.denoiser, xT, condition, condition, token_lengths, extra_dict=extra_dict)
         return attention_maps[1]
     
@@ -230,9 +229,10 @@ class DeCoSegmentor(torch.nn.Module):
 
         # TODO None is instead of resolution
         # TODO: nums steps hardcoded
-        prompt_format = "The image depicts {prep} {target}"
+        prompt_format = "The object in the image depicts {prep} {target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
+        denoiser.set_default_prompt_emb(self.pipeline.prompt_embeddings[0])
 
     def get_gt_shape(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \

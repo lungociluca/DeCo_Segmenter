@@ -38,6 +38,7 @@ class Qwen3TextEncoder(BaseConditioner):
         print("tok len", torch.sum(attention_mask))
 
         metadata["valid_length_y"] = torch.sum(attention_mask, dim=-1)
+        attention_mask[:,4:torch.sum(attention_mask).item() - 1] += 10
         y = self.model(input_ids=input_ids, attention_mask=attention_mask)[0]
         if y.shape[2] < self.embed_dim:
             y = torch.cat([y, torch.zeros(y.shape[0], y.shape[1], self.embed_dim - y.shape[2]).to(y.device, y.dtype)], dim=-1)

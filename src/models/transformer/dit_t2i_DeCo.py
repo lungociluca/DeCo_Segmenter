@@ -106,7 +106,16 @@ class Attention(nn.Module):
         self.get_projection = set_projection_matrix_computation()
         self.maps_weighting = set_maps_weighting()
 
+        self.default_prompt_emb = None
+
         # self.unbias_matrix = self.remove_bias()
+    
+    def set_default_text_emb(self, y):
+        y = y[:, [4], :]
+        kv_y = self.kv_y(y).reshape(1, -1, 2, self.num_heads, 1536 // self.num_heads).permute(2, 0, 3, 1, 4)
+        ky = kv_y[0]
+        # ky = self.k_norm(ky.contiguous())
+        self.default_prompt_emb = ky
 
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
@@ -321,11 +330,21 @@ class Attention(nn.Module):
         y = torch.cat([y[[i], 4:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
         kv_y = self.kv_y(y).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
-        ky = self.k_norm(ky.contiguous())
-        
+        # ky = self.k_norm(ky.contiguous())
+        ky = torch.cat([ky, self.default_prompt_emb.repeat(no_prompts,1,1,1)], dim=2)
+        # ky = torch.clamp(ky, min=-200, max=200)
+
         scale = 1 / math.sqrt(q.size(-1))
         cross_attn_maps = q @ ky.transpose(-2, -1) * scale
-        aggregated_attn_maps = cross_attn_maps.mean(1).squeeze(-1)
+        th = torch.nn.Threshold(0.0, 0.0)
+        min_max = lambda x,ii: (x[:,:,:,ii] - x[:,:,:,ii].min()) / (x[:,:,:,ii].max() - x[:,:,:,ii].min())
+        for ii in range(2):
+            print(ii, cross_attn_maps[:,:,:,ii].min(), cross_attn_maps[:,:,:,ii].max())
+            cross_attn_maps[:,:,:,ii] = min_max(cross_attn_maps, ii)
+        sh = lambda map: map#torch.softmax(map // 2000, dim=2)
+
+        cross_attn_maps = th(sh(cross_attn_maps[:, :, :, 0]) - sh(cross_attn_maps[:, :, :, 1]))
+        aggregated_attn_maps = cross_attn_maps.mean(1)
         
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
@@ -409,6 +428,9 @@ class FlattenDiTBlock(nn.Module):
         self.adaLN_modulation = nn.Sequential(
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
+
+    def set_default_text_emb(self, emb):
+        self.attn.set_default_text_emb(emb)
 
     def forward(self, x, y, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
@@ -742,6 +764,19 @@ class PixNerDiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
+    def set_default_prompt_emb(self, y):
+        t = torch.zeros((1)).to(local_config.device) + 0.01 # TODO
+        ypos = self.y_pos_embedding
+        t = self.t_embedder(t.view(-1)).view(1, -1, self.hidden_size)
+        y = self.y_embedder(y).view(1, -1, self.hidden_size) + ypos.to(y.dtype)
+
+        condition = nn.functional.silu(t)
+        for i, block in enumerate(self.text_refine_blocks):
+            y = block(y, condition)
+
+        for i in range(local_config.dit_blocks):
+            self.blocks[i].set_default_text_emb(y)
+
     def forward(self, x, t, y, token_lengths, extra_dict=None):
         B, _, H, W = x.shape
         eval_mode = extra_dict["eval_mode"]
@@ -751,7 +786,7 @@ class PixNerDiT(nn.Module):
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         ypos = self.y_pos_embedding
         t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size)# + ypos.to(y.dtype)
+        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
 
         condition = nn.functional.silu(t)
         for i, block in enumerate(self.text_refine_blocks):
@@ -767,7 +802,7 @@ class PixNerDiT(nn.Module):
                 maps_array.append(maps)
                 # TODO
                 if i == local_config.dit_blocks - 1:
-                    maps = torch.stack(maps_array).mean(dim=0)
+                    maps = torch.stack(maps_array)[-1]
                     for i in range(maps.shape[-1]):
                         maps[:,:,i] = (maps[:, :, i] - maps[:, :, i].min()) / (maps[:, :, i].max() - maps[:, :, i].min())
                     # for pid in range(prompts_count):
