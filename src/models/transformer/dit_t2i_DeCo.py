@@ -107,11 +107,13 @@ class Attention(nn.Module):
         self.maps_weighting = set_maps_weighting()
 
         self.prompt_embs = None
+        self.ys = None
 
         # self.unbias_matrix = self.remove_bias()
     
     def set_default_text_emb(self, y, token_lengths):
         y = torch.cat([y[[i], token_idx:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
+        self.ys = y
         kv_y = self.kv_y(y).reshape(y.shape[0], -1, 2, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
         self.prompt_embs = ky.squeeze(-2).squeeze(0)
@@ -238,13 +240,14 @@ class Attention(nn.Module):
         output = output / torch.max(output)
         return torch.diagflat(output).to(local_config.device)
     
-    def forward_orig(self, x: torch.Tensor, y, pos) -> torch.Tensor:
+    def forward_orig(self, x: torch.Tensor, y_not_used, pos, class_ids=None) -> torch.Tensor:
         B, N, C = x.shape
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
         q = self.q_norm(q.contiguous())
         kx = self.k_norm(kx.contiguous())
         # q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
+        y = torch.cat([self.ys[[i.item()]] for i in class_ids], dim=0)
         kv_y = self.kv_y(y).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky, vy = kv_y[0], kv_y[1]
         ky = self.k_norm(ky.contiguous())
@@ -317,19 +320,20 @@ class Attention(nn.Module):
         B, N, C = x.shape
         no_prompts = len(class_ids)
         # IMAGE PROJECTIONS
-        qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q = qkv_x[0]
-        q = q.contiguous()
+        q = x
+        # qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # q = qkv_x[0]
+        # q = q.contiguous()
         
         # print(q.dtype, self.unbias_matrix.dtype)
         # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
         # q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
 
         # PROMPT PROJECTIONS
-        ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0)
-        ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
-        ky = ky.unsqueeze(2)
-
+        ky = torch.cat([self.ys[[i.item()]] for i in class_ids], dim=0)
+        ky = torch.cat([ky, self.ys[[0]]], dim=0)
+        ky = ky.unsqueeze(1)
+        # print('q, k', q.shape, ky.shape)
         # q = q / torch.nn.functional.normalize(q, dim=-1)
         # ky = ky / torch.nn.functional.normalize(ky, dim=-1)
 
@@ -344,8 +348,9 @@ class Attention(nn.Module):
         #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
         # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[0:no_prompts].mean() - cross_attn_maps[[no_prompts]] + cross_attn_maps[[no_prompts]].mean())
-        aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
+        cross_attn_maps = cross_attn_maps[0:no_prompts]
+        aggregated_attn_maps = cross_attn_maps.unsqueeze(-1)
+        print(aggregated_attn_maps.shape)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
         aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p tmp-> tmp p b')
@@ -362,7 +367,7 @@ class Attention(nn.Module):
                 self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
                                                     extra_dict=extra_dict,l=l)                
 
-        return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
+        return self.forward_orig(x, y, pos, class_ids=class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
     def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
