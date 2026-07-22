@@ -307,10 +307,10 @@ class Attention(nn.Module):
     def cluster(self, q, no_centroids):
         H, P, D = q.shape
         q = einops.rearrange(q, "h p d -> p (h d)")
-        centroids = (torch.rand((no_centroids, H * D)).to(q.device) * 2 - 1) * q.max()
+        centroids = torch.rand((no_centroids, H * D)).to(q.device) * 2 - 1
 
         # Define the number of iterations
-        num_iterations = 400
+        num_iterations = 50
 
         for _ in range(num_iterations):
             # Calculate distances from data points to centroids
@@ -455,7 +455,7 @@ class Attention(nn.Module):
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
         q = self.q_norm(q.contiguous())
-        # q = q / torch.nn.functional.normalize(q, dim=-1)
+        q = q / torch.norm(q, dim=-1).unsqueeze(-1)
         
         centroids_count = 30
         orig_img = torch.nn.functional.interpolate(extra_dict["image"].unsqueeze(0), [img_h, img_w], mode='bilinear', align_corners=False).squeeze(0)
