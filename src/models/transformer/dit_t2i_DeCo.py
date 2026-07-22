@@ -111,7 +111,7 @@ class Attention(nn.Module):
         # self.unbias_matrix = self.remove_bias()
     
     def set_default_text_emb(self, y, token_lengths):
-        y = torch.cat([y[[i], 4:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
+        y = torch.cat([y[[i], token_idx:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
         kv_y = self.kv_y(y).reshape(y.shape[0], -1, 2, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
         self.prompt_embs = ky.squeeze(-2).squeeze(0)
@@ -319,7 +319,7 @@ class Attention(nn.Module):
         # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
-        q = self.q_norm(q.contiguous())
+        q = q.contiguous()
         
         # print(q.dtype, self.unbias_matrix.dtype)
         # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
@@ -330,16 +330,22 @@ class Attention(nn.Module):
         ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
         ky = ky.unsqueeze(2)
 
-        scale = 1 / math.sqrt(q.size(-1))
-        
-        cross_attn_maps = q @ ky.transpose(-2, -1) * scale
-        th = torch.nn.Threshold(0.0, 0.0)
-        min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
-        for ii in range(cross_attn_maps.shape[-1]):
-            cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
+        # q = q / torch.nn.functional.normalize(q, dim=-1)
+        # ky = ky / torch.nn.functional.normalize(ky, dim=-1)
 
-        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[-1]])
-        aggregated_attn_maps = cross_attn_maps.mean(1)
+        # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
+        cos = torch.nn.CosineSimilarity(dim=-1)
+        cross_attn_maps = cos(q, ky) + 4
+        # cross_attn_maps = torch.clamp(cross_attn_maps, min=1.2, max=1.5)
+
+        th = torch.nn.Threshold(0.0, 0.0)
+        # min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
+        # for ii in range(cross_attn_maps.shape[-1]):
+        #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
+
+        # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
+        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[0:no_prompts].mean() - cross_attn_maps[[no_prompts]] + cross_attn_maps[[no_prompts]].mean())
+        aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
         aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p tmp-> tmp p b')
@@ -763,7 +769,7 @@ class PixNerDiT(nn.Module):
         t = torch.zeros((B)).to(local_config.device) + 0.01 # TODO
         ypos = self.y_pos_embedding
         t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(B, -1, self.hidden_size) + ypos.to(y.dtype)
+        y = self.y_embedder(y).view(B, -1, self.hidden_size) #+ ypos.to(y.dtype)
         self.y_embedder.to("cpu")
 
         condition = nn.functional.silu(t)
