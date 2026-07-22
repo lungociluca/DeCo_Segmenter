@@ -106,16 +106,15 @@ class Attention(nn.Module):
         self.get_projection = set_projection_matrix_computation()
         self.maps_weighting = set_maps_weighting()
 
-        self.default_prompt_emb = None
+        self.prompt_embs = None
 
         # self.unbias_matrix = self.remove_bias()
     
-    def set_default_text_emb(self, y):
-        y = y[:, [4], :]
-        kv_y = self.kv_y(y).reshape(1, -1, 2, self.num_heads, 1536 // self.num_heads).permute(2, 0, 3, 1, 4)
+    def set_default_text_emb(self, y, token_lengths):
+        y = torch.cat([y[[i], 4:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
+        kv_y = self.kv_y(y).reshape(y.shape[0], -1, 2, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
-        # ky = self.k_norm(ky.contiguous())
-        self.default_prompt_emb = ky
+        self.prompt_embs = ky.squeeze(-2).squeeze(0)
 
     @staticmethod
     def softmax_for_each_prompt(attn_map, no_prompts):
@@ -313,10 +312,10 @@ class Attention(nn.Module):
 
         return torch.zeros(x.shape).to(local_config.device), aggregated_attn_maps
     
-    def forward_attention(self, x: torch.Tensor, y, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
+    def forward_attention(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False,l=1000):
         B, N, C = x.shape
-        no_prompts = y.shape[0]
+        no_prompts = len(class_ids)
         # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
@@ -327,29 +326,24 @@ class Attention(nn.Module):
         # q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
 
         # PROMPT PROJECTIONS
-        y = torch.cat([y[[i], 4:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
-        kv_y = self.kv_y(y).reshape(no_prompts, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        ky = kv_y[0]
-        # ky = self.k_norm(ky.contiguous())
-        ky = torch.cat([ky, self.default_prompt_emb.repeat(no_prompts,1,1,1)], dim=2)
-        # ky = torch.clamp(ky, min=-200, max=200)
+        ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0)
+        ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
+        ky = ky.unsqueeze(2)
 
         scale = 1 / math.sqrt(q.size(-1))
+        
         cross_attn_maps = q @ ky.transpose(-2, -1) * scale
         th = torch.nn.Threshold(0.0, 0.0)
-        min_max = lambda x,ii: (x[:,:,:,ii] - x[:,:,:,ii].min()) / (x[:,:,:,ii].max() - x[:,:,:,ii].min())
-        for ii in range(2):
-            print(ii, cross_attn_maps[:,:,:,ii].min(), cross_attn_maps[:,:,:,ii].max())
-            cross_attn_maps[:,:,:,ii] = min_max(cross_attn_maps, ii)
-        sh = lambda map: map#torch.softmax(map // 2000, dim=2)
+        min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
+        for ii in range(cross_attn_maps.shape[-1]):
+            cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
-        cross_attn_maps = th(sh(cross_attn_maps[:, :, :, 0]) - sh(cross_attn_maps[:, :, :, 1]))
+        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[-1]])
         aggregated_attn_maps = cross_attn_maps.mean(1)
-        
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
-        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p-> p b').unsqueeze(0)
-        
+        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p tmp-> tmp p b')
+
         # for t in range(15):
         #     for i in range(no_prompts):
         #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
@@ -364,11 +358,11 @@ class Attention(nn.Module):
 
         return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
-    def forward(self, x: torch.Tensor, y, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
+    def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
         config_forward_method: local_config.ForwardMethod = local_config.forward_method
         if config_forward_method == local_config.ForwardMethod.ATTENTION:
-            return self.forward_attention(x, y, pos, token_lengths, extra_dict, attention_maps_dir, img_h, img_w, eval_mode,l=l)
+            return self.forward_attention(x, y, class_ids, pos, token_lengths, extra_dict, attention_maps_dir, img_h, img_w, eval_mode,l=l)
         elif config_forward_method == local_config.ForwardMethod.COSINE_SIMILARITY:
             return self.forward_cosine(x, y, pos, extra_dict, attention_maps_dir, img_h, img_w, eval_mode)
         else:
@@ -429,12 +423,12 @@ class FlattenDiTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
 
-    def set_default_text_emb(self, emb):
-        self.attn.set_default_text_emb(emb)
+    def set_default_text_emb(self, emb, token_lengths):
+        self.attn.set_default_text_emb(emb, token_lengths)
 
-    def forward(self, x, y, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
+    def forward(self, x, y, class_ids, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
+        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, class_ids, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
         x = x + gate_msa * x
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x, attn_maps
@@ -764,39 +758,42 @@ class PixNerDiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-    def set_default_prompt_emb(self, y):
-        t = torch.zeros((1)).to(local_config.device) + 0.01 # TODO
+    def set_default_prompt_emb(self, y, token_lengths):
+        B = y.shape[0]
+        t = torch.zeros((B)).to(local_config.device) + 0.01 # TODO
         ypos = self.y_pos_embedding
-        t = self.t_embedder(t.view(-1)).view(1, -1, self.hidden_size)
-        y = self.y_embedder(y).view(1, -1, self.hidden_size) + ypos.to(y.dtype)
+        t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        y = self.y_embedder(y).view(B, -1, self.hidden_size) + ypos.to(y.dtype)
+        self.y_embedder.to("cpu")
 
         condition = nn.functional.silu(t)
         for i, block in enumerate(self.text_refine_blocks):
             y = block(y, condition)
+            block = block.to("cpu")
 
         for i in range(local_config.dit_blocks):
-            self.blocks[i].set_default_text_emb(y)
+            self.blocks[i].set_default_text_emb(y, token_lengths)
 
-    def forward(self, x, t, y, token_lengths, extra_dict=None):
+    def forward(self, x, t, y, class_ids, token_lengths, extra_dict=None):
         B, _, H, W = x.shape
         eval_mode = extra_dict["eval_mode"]
-        prompts_count = y.shape[0]
+        prompts_count = len(class_ids)
         # y = y[prompts_count:]
         x = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         ypos = self.y_pos_embedding
         t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
-        y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
+        # y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
 
         condition = nn.functional.silu(t)
-        for i, block in enumerate(self.text_refine_blocks):
-            y = block(y, condition)
+        # for i, block in enumerate(self.text_refine_blocks):
+        #     y = block(y, condition)
 
         s = self.s_embedder(x)
         attention_maps_dir_format = os.path.join(local_config.attention_maps_dir, "{idx}_attn_maps")
         maps_array = []
         for i in range(self.num_encoder_blocks):
-            s, maps = self.blocks[i](s, y, condition, xpos, token_lengths, extra_dict=extra_dict, attn_maps_dir=attention_maps_dir_format.format(idx=i), 
+            s, maps = self.blocks[i](s, y, class_ids, condition, xpos, token_lengths, extra_dict=extra_dict, attn_maps_dir=attention_maps_dir_format.format(idx=i), 
                                img_h=H // self.patch_size, img_w=W // self.patch_size, l=i)
             if eval_mode:
                 maps_array.append(maps)
