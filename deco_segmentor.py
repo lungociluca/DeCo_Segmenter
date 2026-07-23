@@ -232,12 +232,12 @@ class DeCoSegmentor(torch.nn.Module):
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
         denoiser.set_default_prompt_emb(self.pipeline.prompt_embeddings, self.pipeline.token_lenghts)
 
-    def get_gt_shape(self, x):
+    def get_gt(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
             .replace(".jpg", self.dataset_config["extention"])
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
-        return mask_tensor.shape
+        return mask_tensor
     
     def get_gt_labels(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
@@ -280,7 +280,8 @@ class DeCoSegmentor(torch.nn.Module):
     def forward_no_grad(self, x):
         image_tensor = x[0]["image"]
         gt_idxs_and_labels = self.get_gt_labels(x)
-        gt_shape = self.get_gt_shape(x)
+        gt = self.get_gt(x)
+        gt_shape = gt.shape
         prompt_format = "The image depicts {prep} {target}"
         # TODO: was a +1: len of categs+1
         prediction = torch.zeros((self.categs_count, gt_shape[-2], gt_shape[-1])).to(local_config.device)
@@ -293,7 +294,9 @@ class DeCoSegmentor(torch.nn.Module):
         extra_dict = {
             "prompts": prompts,
             "eval_mode": local_config.eval,
-            "img_id": self.idx
+            "img_id": self.idx,
+            "gt": gt,
+            "image": x[0]["image"]
         }
         
         attention_maps = self.call_with_defaults(image_tensor, label_ids, extra_dict)
@@ -314,9 +317,9 @@ class DeCoSegmentor(torch.nn.Module):
             label_idx = label_and_idx[0]
             prediction[label_idx.item()] += resized_map[i]
 
-        visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
-                             self.categs,
-                             x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
+        # visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
+        #                      self.categs,
+        #                      x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
         self.idx += 1
         postprocess_func = self.postprocess_ade150 if local_config.eval_dataset == local_config.EvalDatasets.ADE150 else self.postprocess_voc12
         return [{"sem_seg": postprocess_func(prediction)}] # TODO: verify slicing
