@@ -314,9 +314,9 @@ class DeCoSegmentor(torch.nn.Module):
             label_idx = label_and_idx[0]
             prediction[label_idx.item()] += resized_map[i]
 
-        visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
-                             self.categs,
-                             x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
+        # visualize_prediction(self.resize_maps(image_tensor.unsqueeze(0), gt_shape[1:]), prediction.detach().cpu(), 
+        #                      self.categs,
+        #                      x[0]['file_name'].split("/")[-1].replace(".jpg", ""))
         self.idx += 1
         postprocess_func = self.postprocess_ade150 if local_config.eval_dataset == local_config.EvalDatasets.ADE150 else self.postprocess_voc12
         return [{"sem_seg": postprocess_func(prediction)}] # TODO: verify slicing

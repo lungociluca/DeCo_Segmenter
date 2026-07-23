@@ -197,7 +197,7 @@ def save_sample_segmentations(args):
 
 
 class Args:
-    val_split = 0.5
+    val_split = 0.9
     comment='train1464'
     curve=True
     end=70
@@ -221,7 +221,7 @@ def test():
 
     if args.sample_images:
         save_sample_segmentations(args)
-
+    # exit(0)
     if not os.path.exists(args.cam_npy_dir):
         os.makedirs(args.cam_npy_dir)
 

@@ -330,8 +330,8 @@ class Attention(nn.Module):
         ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
         ky = ky.unsqueeze(2)
 
-        # q = q / torch.nn.functional.normalize(q, dim=-1)
-        # ky = ky / torch.nn.functional.normalize(ky, dim=-1)
+        q = (q - q.mean()) / q.std()
+        ky = (ky - ky.mean()) / ky.std()
 
         # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
         cos = torch.nn.CosineSimilarity(dim=-1)
@@ -344,7 +344,7 @@ class Attention(nn.Module):
         #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
         # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[0:no_prompts].mean() - cross_attn_maps[[no_prompts]] + cross_attn_maps[[no_prompts]].mean())
+        cross_attn_maps = th(cross_attn_maps[0:no_prompts])
         aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
@@ -356,11 +356,11 @@ class Attention(nn.Module):
         #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
         #                                             extra_dict=extra_dict, idx=t,l=l)
         
-        if attention_maps_dir is not None:
-            for i in range(no_prompts):
-                aggregated_slice = aggregated_attn_maps[:, :, i]
-                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-                                                    extra_dict=extra_dict,l=l)                
+        # if attention_maps_dir is not None:
+        #     for i in range(no_prompts):
+        #         aggregated_slice = aggregated_attn_maps[:, :, i]
+        #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+        #                                             extra_dict=extra_dict,l=l)                
 
         return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
