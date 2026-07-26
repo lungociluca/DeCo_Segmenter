@@ -330,8 +330,8 @@ class Attention(nn.Module):
         ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
         ky = ky.unsqueeze(2)
 
-        q = (q - q.mean()) / q.std()
-        ky = (ky - ky.mean()) / ky.std()
+        # q = (q - q.mean()) / q.std()
+        # ky = (ky - ky.mean()) / ky.std()
 
         # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
         cos = torch.nn.CosineSimilarity(dim=-1)
@@ -348,7 +348,6 @@ class Attention(nn.Module):
         aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
-        aggregated_attn_maps = einops.rearrange(aggregated_attn_maps, 'b p tmp-> tmp p b')
 
         # for t in range(15):
         #     for i in range(no_prompts):
@@ -806,12 +805,12 @@ class PixNerDiT(nn.Module):
                 # TODO
                 if i == local_config.dit_blocks - 1:
                     maps = torch.stack(maps_array)[-1]
-                    for i in range(maps.shape[-1]):
-                        maps[:,:,i] = (maps[:, :, i] - maps[:, :, i].min()) / (maps[:, :, i].max() - maps[:, :, i].min())
+                    # for i in range(maps.shape[-1]):
+                        # maps[:,:,i] = (maps[:, :, i] - maps[:, :, i].min()) / (maps[:, :, i].max() - maps[:, :, i].min())
                     # for pid in range(prompts_count):
                     #     Attention._save_attention_maps_as_images(maps[:,:,pid], maps, maps, maps, attention_maps_dir_format.format(idx=99), pid, "", H // self.patch_size,  img_w=W // self.patch_size,
                     #                                     extra_dict=extra_dict,l=99999990)  
-                    return einops.rearrange(maps[0], "p b -> b p").reshape(prompts_count, H//self.patch_size, W//self.patch_size)
+                    return maps[:,:,0].reshape(prompts_count, H//self.patch_size, W//self.patch_size)
                 
         # s = torch.nn.functional.silu(t + s)
         # batch_size, length, _ = s.shape

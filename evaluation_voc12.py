@@ -197,10 +197,10 @@ def save_sample_segmentations(args):
 
 
 class Args:
-    val_split = 0.9
+    val_split = 1.
     comment='train1464'
     curve=True
-    end=70
+    end=15
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
