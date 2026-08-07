@@ -112,8 +112,8 @@ class Attention(nn.Module):
         # self.unbias_matrix = self.remove_bias()
     
     def set_default_text_emb(self, y, token_lengths):
-        y = torch.cat([y[[i], token_idx:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
         self.ys = y
+        y = torch.cat([y[[i], token_idx:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
         kv_y = self.kv_y(y).reshape(y.shape[0], -1, 2, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
         self.prompt_embs = ky.squeeze(-2).squeeze(0)
@@ -438,8 +438,58 @@ class Attention(nn.Module):
         no_prompts = y.shape[0]
         # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q = qkv_x[0]
-        q = q.contiguous()
+        q, k, v = qkv_x
+
+        xx = q
+        xx = torch.functional.F.normalize(einops.rearrange(xx, "b h p d -> p (b h d)"), dim=1)
+        cos_sim = xx @ xx.T
+
+        max_rows = cos_sim.max(dim=-1)[0]
+        hello = lambda i: 1 if cos_sim[i,i] == max_rows[i] else 0
+        max_diag_count = sum([hello(i) for i in range(cos_sim.shape[0])])
+        print("Max diag", max_diag_count, "out of", cos_sim.shape[0])
+
+        # Plot
+        plt.figure(figsize=(8, 6))
+        plt.imshow(cos_sim.cpu().numpy(), vmin=-1, vmax=1)
+        plt.colorbar(label="Cosine similarity")
+        plt.title("Cosine Similarity Matrix")
+        plt.xlabel("Vector index")
+        plt.ylabel("Vector index")
+        plt.tight_layout()
+        plt.savefig(f"z_output/similarity_{extra_dict['img_id']}_{l}.png")
+        plt.close()
+
+        is_max_patch = torch.LongTensor([hello(i) for i in range(N)])
+
+        # plt.figure(figsize=(8, 6))
+        # plt.imshow(is_max_patch.reshape(img_h, img_w).cpu().numpy(), vmin=-1, vmax=1)
+        # plt.title("Is max patch")
+        # plt.xlabel("Vector index")
+        # plt.ylabel("Vector index")
+        # plt.tight_layout()
+        # plt.savefig(f"z_output/max_{extra_dict['img_id']}.png")
+        # plt.close()
+
+        ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0).unsqueeze(2)
+        rearr = lambda x: einops.rearrange(x, "b h p d -> (b p) (h d)")
+        norm_func = lambda x: torch.nn.functional.normalize(x, dim=-1)
+        min_max = lambda x: (x - x.min()) / (x.max() - x.min())
+        comp = lambda x: norm_func(rearr(x))
+        print('mul', comp(ky).shape, comp(q).T.shape)
+        cross = comp(ky) @ comp(q).T
+        for idx in range(cross.shape[0]):
+            plt.figure(figsize=(8, 6))
+            plt.imshow(min_max(cross[idx]).reshape(img_h, img_w).cpu().numpy(), vmin=-1, vmax=1)
+            plt.colorbar(label="Cosine similarity")
+            plt.title("Cosine Similarity Matrix")
+            plt.xlabel("Vector index")
+            plt.ylabel("Vector index")
+            plt.tight_layout()
+            plt.savefig(f"z_output/cross_{extra_dict['img_id']}_{idx}_{l}.png")
+            plt.close()
+        
+        
         q = (q - q.mean()) / q.std()
         # q = q / torch.norm(q, dim=-1).unsqueeze(-1)
         
@@ -447,8 +497,9 @@ class Attention(nn.Module):
 
         labels = self.cluster(einops.rearrange(q[0], 'h p d -> p (h d)'), local_config.no_clusters)
         labels_img = labels.view(img_h, img_w)
+        self.visualize_prediction(orig_img.detach().cpu(), is_max_patch.reshape(img_h, img_w).cpu().numpy(), 2, ['0', '1'], f'max_{extra_dict["img_id"]}_{l}')
         
-        # self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), local_config.no_clusters, [str(i) for i in range(local_config.no_clusters)], f'{extra_dict["img_id"]}_{l}')
+        self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), local_config.no_clusters, [str(i) for i in range(local_config.no_clusters)], f'{extra_dict["img_id"]}_{l}')
         return self.forward_orig(x, y, pos, class_ids=class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=local_config.device), labels
     
     def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
@@ -521,8 +572,9 @@ class FlattenDiTBlock(nn.Module):
 
     def forward(self, x, y, class_ids, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, class_ids, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
-        x = x + gate_msa * x
+        x_attn, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, class_ids, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
+
+        x = x + gate_msa * x_attn
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x, attn_maps
 
