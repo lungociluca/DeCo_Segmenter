@@ -107,10 +107,13 @@ class Attention(nn.Module):
         self.maps_weighting = set_maps_weighting()
 
         self.prompt_embs = None
+        self.ys = None
 
         # self.unbias_matrix = self.remove_bias()
     
     def set_default_text_emb(self, y, token_lengths):
+        if local_config.dit_blocks > 1:
+            self.ys = y
         y = torch.cat([y[[i], token_idx:token_idx+1, :].mean(1) for i, token_idx in enumerate(token_lengths)], dim=0)
         kv_y = self.kv_y(y).reshape(y.shape[0], -1, 2, self.num_heads, self.dim // self.num_heads).permute(2, 0, 3, 1, 4)
         ky = kv_y[0]
@@ -238,13 +241,14 @@ class Attention(nn.Module):
         output = output / torch.max(output)
         return torch.diagflat(output).to(local_config.device)
     
-    def forward_orig(self, x: torch.Tensor, y, pos) -> torch.Tensor:
+    def forward_orig(self, x: torch.Tensor, y, pos, class_ids=None) -> torch.Tensor:
         B, N, C = x.shape
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
         q = self.q_norm(q.contiguous())
         kx = self.k_norm(kx.contiguous())
         # q, kx = apply_rotary_emb(q, kx, freqs_cis=pos)
+        y = torch.cat([self.ys[[i.item()]] for i in class_ids], dim=0)
         kv_y = self.kv_y(y).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         ky, vy = kv_y[0], kv_y[1]
         ky = self.k_norm(ky.contiguous())
@@ -343,8 +347,8 @@ class Attention(nn.Module):
         # for ii in range(cross_attn_maps.shape[-1]):
         #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
-        # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        cross_attn_maps = th(cross_attn_maps[0:no_prompts])
+        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
+        # cross_attn_maps = th(cross_attn_maps[0:no_prompts])
         aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
@@ -354,14 +358,14 @@ class Attention(nn.Module):
         #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
         #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
         #                                             extra_dict=extra_dict, idx=t,l=l)
-        
-        # if attention_maps_dir is not None:
-        #     for i in range(no_prompts):
-        #         aggregated_slice = aggregated_attn_maps[:, :, i]
-        #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-        #                                             extra_dict=extra_dict,l=l)                
 
-        return self.forward_orig(x, y, pos) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
+        if attention_maps_dir is not None:
+            for i in range(no_prompts):
+                aggregated_slice = aggregated_attn_maps[i, :, 0]
+                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+                                                    extra_dict=extra_dict,l=l)                
+
+        return self.forward_orig(x, y, pos, class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
     def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
@@ -388,32 +392,24 @@ class Attention(nn.Module):
         """
         # Create directory if it doesn't exist
         os.makedirs(save_dir, exist_ok=True)
-        # Determine spatial dimensions
-        N = self_attn_maps.shape[1]
-        if img_h is None or img_w is None:
-            # Assume square spatial arrangement
-            spatial_size = int(N ** 0.5)
-            img_h, img_w = spatial_size, spatial_size
         
         # Save cross-attention maps
         cross_attn_np = cross_attn_maps.cpu().detach().numpy()
-        for b in range(cross_attn_np.shape[0]):
-            # shape (N, M) - reshape query dimension to spatial
-            attn_map = cross_attn_np[b]  # shape (N, M)
-            attn_spatial = attn_map.reshape(img_h, img_w, -1)
-            # Average over text tokens (last dimension)
-            attn_spatial_avg = attn_spatial.mean(axis=2)
-            
-            fig, ax = plt.subplots(figsize=(img_w, img_h))
-            im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
-            ax.set_title(f'Cross-Attention - Batch {b}')
-            ax.set_xlabel('Image Width')
-            ax.set_ylabel('Image Height')
-            plt.colorbar(im, ax=ax)
-            
-            save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_{label}_lyr_{l}_{b}_{idx}.png')
-            plt.savefig(save_path, dpi=100, bbox_inches='tight')
-            plt.close(fig)
+        attn_map = cross_attn_np
+        attn_spatial = attn_map.reshape(img_h, img_w, -1)
+        # Average over text tokens (last dimension)
+        attn_spatial_avg = attn_spatial.mean(axis=2)
+        
+        fig, ax = plt.subplots(figsize=(img_w, img_h))
+        im = ax.imshow(attn_spatial_avg, cmap='viridis', aspect='equal')
+        ax.set_title(f'Cross-Attention')
+        ax.set_xlabel('Image Width')
+        ax.set_ylabel('Image Height')
+        plt.colorbar(im, ax=ax)
+        
+        save_path = os.path.join(save_dir, f'cross_attn_img{extra_dict["img_id"]}_{label}_cls_{idx}_l_{l}.png')
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        plt.close(fig)
 
 
 class FlattenDiTBlock(nn.Module):
@@ -433,9 +429,14 @@ class FlattenDiTBlock(nn.Module):
 
     def forward(self, x, y, class_ids, c, pos, token_lengths, extra_dict=None, attn_maps_dir=None, img_h=None, img_w=None,l=1000):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, class_ids, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
-        x = x + gate_msa * x
-        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x_attn, attn_maps = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), y, class_ids, pos, token_lengths, extra_dict, attn_maps_dir, img_h, img_w, eval_mode=local_config.eval,l=l)
+        if local_config.use_gate:
+            x = x + gate_msa * x_attn
+            x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        else:
+            x = x_attn
+            x = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+            
         return x, attn_maps
 
 class NerfEmbedder(nn.Module):
@@ -804,7 +805,7 @@ class PixNerDiT(nn.Module):
                 maps_array.append(maps)
                 # TODO
                 if i == local_config.dit_blocks - 1:
-                    maps = torch.stack(maps_array)[-1]
+                    maps = torch.stack(maps_array).mean(dim=0)
                     # for i in range(maps.shape[-1]):
                         # maps[:,:,i] = (maps[:, :, i] - maps[:, :, i].min()) / (maps[:, :, i].max() - maps[:, :, i].min())
                     # for pid in range(prompts_count):

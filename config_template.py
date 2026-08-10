@@ -2,6 +2,9 @@ import os
 from enum import Enum
 from typing import List
 
+class EvalDatasets(Enum):
+    ADE150 = "ade150"
+    VOC12 = "voc12"
 
 class CrossAttnType(Enum):
     Q_K = 'q-k'
@@ -30,14 +33,31 @@ class ForwardMethod(Enum):
 
 device = "mps"
 
+datasets = {
+    EvalDatasets.ADE150: {
+        "json": "catseg_configs/ade150.json",
+        "img_dir": "images",
+        "gt_dir": "annotations",
+        "extention": ".png"
+    },
+    EvalDatasets.VOC12: {
+        "json": "catseg_configs/voc20.json",
+        "img_dir": "JPEGImages",
+        "gt_dir": "SegmentationClassAug",
+        "extention": ".png"
+    }
+}
+
+run_on_textures = True
+eval_dataset = EvalDatasets.VOC12
 out_image_path = "out.jpg"
-num_steps = 5
+num_steps = 101
 guidance = 3.0
 image_height = 512
 image_width = 512
 num_images = 1
 label = "a photograph of a dog"
-neg_label = "a photo of a something whitin a complex scene"
+neg_label = "a photo of background"
 
 seed = 12
 timeshift = 1
@@ -46,23 +66,27 @@ order = 2
 attention_maps_dir = "attn_maps"
 save_maps = True
 eval = True
-eval_samples_limit = 1
-idx_token_of_interest = 3
 
-dit_blocks = 1
-background_threshold = 0.0004
+background_threshold = 0.3
 unbiasing_components_count = 2
-gt_file_extention = "jpg"
+no_clusters = 8
 
 self_attn_softmax_temperature = 0.7
-cross_attn_softmax_temperature = 100
+cross_attn_softmax_temperature = 2000
 aggregated_maps_softmax_temperature = 0.7
 
 cross_attention_types: List[CrossAttnType] = [
     CrossAttnType.Q_K,
 ]
-attention_aggregate_method: AttentionAggregateMethod = AttentionAggregateMethod.MERGE_WITH_SELF_ATTN
+attention_aggregate_method: AttentionAggregateMethod = AttentionAggregateMethod.NO_OP
 head_aggregate_method: HeadAggregateMethod = HeadAggregateMethod.MEAN
 attention_map_projection: AttentionMapsProjection = AttentionMapsProjection.NO_OP
 maps_weighting: MapsWeighting = MapsWeighting.NO_OP
 forward_method: ForwardMethod = ForwardMethod.ATTENTION
+
+
+
+dit_blocks = 5
+idx_token_of_interest = 4
+eval_samples_limit = 30
+use_gate = True
