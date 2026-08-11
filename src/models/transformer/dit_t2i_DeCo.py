@@ -259,7 +259,6 @@ class Attention(nn.Module):
         q = q.view(B, self.num_heads, -1, C // self.num_heads)  # B, H, N, Hc
         k = k.view(B, self.num_heads, -1, C // self.num_heads).contiguous()  # B, H, N, Hc
         v = v.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
-
         x = attention(q, k, v)
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
@@ -331,7 +330,7 @@ class Attention(nn.Module):
 
         # PROMPT PROJECTIONS
         ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0)
-        ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
+        # ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
         ky = ky.unsqueeze(2)
 
         # q = (q - q.mean()) / q.std()
@@ -339,6 +338,7 @@ class Attention(nn.Module):
 
         # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
         cos = torch.nn.CosineSimilarity(dim=-1)
+        print("cosine q k", q.shape, ky.shape)
         cross_attn_maps = cos(q, ky) + 4
         # cross_attn_maps = torch.clamp(cross_attn_maps, min=1.2, max=1.5)
 
@@ -347,8 +347,8 @@ class Attention(nn.Module):
         # for ii in range(cross_attn_maps.shape[-1]):
         #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
-        cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        # cross_attn_maps = th(cross_attn_maps[0:no_prompts])
+        # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
+        cross_attn_maps = th(cross_attn_maps)
         aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
@@ -358,12 +358,11 @@ class Attention(nn.Module):
         #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
         #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
         #                                             extra_dict=extra_dict, idx=t,l=l)
-
         if attention_maps_dir is not None:
             for i in range(no_prompts):
                 aggregated_slice = aggregated_attn_maps[i, :, 0]
                 self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-                                                    extra_dict=extra_dict,l=l)                
+                                                    extra_dict=extra_dict,l=l, idx=class_ids[i])                
 
         return self.forward_orig(x, y, pos, class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
@@ -781,14 +780,15 @@ class PixNerDiT(nn.Module):
             self.blocks[i].set_default_text_emb(y, token_lengths)
 
     def forward(self, x, t, y, class_ids, token_lengths, extra_dict=None):
+        prompts_count = len(class_ids)
+        x = x.repeat(prompts_count, 1, 1, 1)
         B, _, H, W = x.shape
         eval_mode = extra_dict["eval_mode"]
-        prompts_count = len(class_ids)
         # y = y[prompts_count:]
         x = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         ypos = self.y_pos_embedding
-        t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        t = self.t_embedder(t.repeat(B).view(-1)).view(B, -1, self.hidden_size)
         # y = self.y_embedder(y).view(prompts_count, -1, self.hidden_size) + ypos.to(y.dtype)
 
         condition = nn.functional.silu(t)
