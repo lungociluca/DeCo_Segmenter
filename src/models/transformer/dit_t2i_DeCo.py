@@ -240,8 +240,47 @@ class Attention(nn.Module):
         output = output.mean(-1)
         output = output / torch.max(output)
         return torch.diagflat(output).to(local_config.device)
+
+    @staticmethod
+    def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+            is_causal=False, scale=None, enable_gqa=False, extra_dict=None) -> torch.Tensor:
+        L, S = query.size(-2), key.size(-2)
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+        if is_causal:
+            assert attn_mask is None
+            temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+            else:
+                attn_bias = attn_mask + attn_bias
+
+        if enable_gqa:
+            key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+            value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+
+        attn_weight = query @ key.transpose(-2, -1) * scale_factor
+        attn_weight += attn_bias
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+
+        img_id = extra_dict["img_id"]
+        layer = extra_dict["layer"]
+        classes = extra_dict["classes"]
+        h = extra_dict["h"]
+        w = extra_dict["w"]
+
+        to_save = attn_weight.mean(dim=1)
+        to_save = einops.rearrange(to_save, "b (h w) vp -> b h w vp", h=h)
+        for idx, cls_id in enumerate(classes):
+            torch.save(to_save[idx].detach().cpu(), f"data/{layer}/{cls_id.item()}/{img_id}.pt")
+        
+        return attn_weight @ value
     
-    def forward_orig(self, x: torch.Tensor, y, pos, class_ids=None) -> torch.Tensor:
+    def forward_orig(self, x: torch.Tensor, y, pos, class_ids=None, data={}) -> torch.Tensor:
         B, N, C = x.shape
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
@@ -259,7 +298,7 @@ class Attention(nn.Module):
         q = q.view(B, self.num_heads, -1, C // self.num_heads)  # B, H, N, Hc
         k = k.view(B, self.num_heads, -1, C // self.num_heads).contiguous()  # B, H, N, Hc
         v = v.view(B, self.num_heads, -1, C // self.num_heads).contiguous()
-        x = attention(q, k, v)
+        x = self.scaled_dot_product_attention(q, k, v, extra_dict=data)
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -317,54 +356,61 @@ class Attention(nn.Module):
     
     def forward_attention(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
                 img_w: int = None, eval_mode=False,l=1000):
-        B, N, C = x.shape
-        no_prompts = len(class_ids)
-        # IMAGE PROJECTIONS
-        qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q = qkv_x[0]
-        q = q.contiguous()
+        # B, N, C = x.shape
+        # no_prompts = len(class_ids)
+        # # IMAGE PROJECTIONS
+        # qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # q = qkv_x[0]
+        # q = q.contiguous()
         
-        # print(q.dtype, self.unbias_matrix.dtype)
-        # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
-        # q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
+        # # print(q.dtype, self.unbias_matrix.dtype)
+        # # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
+        # # q = einops.rearrange(q, 'b p (h d) -> b h p d', h=self.num_heads)
 
-        # PROMPT PROJECTIONS
-        ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0)
-        # ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
-        ky = ky.unsqueeze(2)
+        # # PROMPT PROJECTIONS
+        # ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0)
+        # # ky = torch.cat([ky, self.prompt_embs[[0]]], dim=0)
+        # ky = ky.unsqueeze(2)
 
-        # q = (q - q.mean()) / q.std()
-        # ky = (ky - ky.mean()) / ky.std()
+        # # q = (q - q.mean()) / q.std()
+        # # ky = (ky - ky.mean()) / ky.std()
 
-        # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
-        cos = torch.nn.CosineSimilarity(dim=-1)
-        print("cosine q k", q.shape, ky.shape)
-        cross_attn_maps = cos(q, ky) + 4
-        # cross_attn_maps = torch.clamp(cross_attn_maps, min=1.2, max=1.5)
+        # # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
+        # cos = torch.nn.CosineSimilarity(dim=-1)
+        # cross_attn_maps = cos(q, ky) + 4
+        # # cross_attn_maps = torch.clamp(cross_attn_maps, min=1.2, max=1.5)
 
-        th = torch.nn.Threshold(0.0, 0.0)
-        # min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
-        # for ii in range(cross_attn_maps.shape[-1]):
-        #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
+        # th = torch.nn.Threshold(0.0, 0.0)
+        # # min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
+        # # for ii in range(cross_attn_maps.shape[-1]):
+        # #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
 
-        # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        cross_attn_maps = th(cross_attn_maps)
-        aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
-        for i in range(no_prompts):
-            aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
+        # # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
+        # cross_attn_maps = th(cross_attn_maps)
+        # aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
+        # for i in range(no_prompts):
+        #     aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())
 
-        # for t in range(15):
+        # # for t in range(15):
+        # #     for i in range(no_prompts):
+        # #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
+        # #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
+        # #                                             extra_dict=extra_dict, idx=t,l=l)
+        # if attention_maps_dir is not None:
         #     for i in range(no_prompts):
-        #         aggregated_slice = aggregated_attn_maps[:, :, i, t]
+        #         aggregated_slice = aggregated_attn_maps[i, :, 0]
         #         self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-        #                                             extra_dict=extra_dict, idx=t,l=l)
-        if attention_maps_dir is not None:
-            for i in range(no_prompts):
-                aggregated_slice = aggregated_attn_maps[i, :, 0]
-                self._save_attention_maps_as_images(aggregated_slice, aggregated_slice, aggregated_slice, aggregated_slice, attention_maps_dir, i, "", img_h, img_w,
-                                                    extra_dict=extra_dict,l=l, idx=class_ids[i])                
+        #                                             extra_dict=extra_dict,l=l, idx=class_ids[i])                
 
-        return self.forward_orig(x, y, pos, class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
+        data = {
+            "img_id": extra_dict["img_id"],
+            'layer': l,
+            "classes": class_ids,
+            "h": img_h,
+            "w": img_w
+        }
+        aggregated_attn_maps = torch.zeros((len(class_ids), x.shape[1], 1)).to(local_config.device)
+        return self.forward_orig(x, y, pos, class_ids, data=data) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=x.device), aggregated_attn_maps
     
     def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):

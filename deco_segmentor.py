@@ -232,12 +232,26 @@ class DeCoSegmentor(torch.nn.Module):
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
         denoiser.set_default_prompt_emb(self.pipeline.prompt_embeddings, self.pipeline.token_lenghts)
 
+        for i in range(16):
+            if not os.path.isdir(f"data/{i}"):
+                os.mkdir(f"data/{i}")
+            for j in range(22):
+                if not os.path.isdir(f"data/{i}/{j}"):
+                    os.mkdir(f"data/{i}/{j}")
+        os.mkdir("data/gt")
+
     def get_gt_shape(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
             .replace(".jpg", self.dataset_config["extention"])
         mask = Image.open(gt_file_path)
         mask_tensor = torch.from_numpy(np.array(mask)).unsqueeze(0)
         return mask_tensor.shape
+
+    def get_gt(self, x):
+        gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
+            .replace(".jpg", self.dataset_config["extention"])
+        mask = Image.open(gt_file_path)
+        return torch.from_numpy(np.array(mask)).unsqueeze(0)
     
     def get_gt_labels(self, x):
         gt_file_path = x[0]['file_name'].replace(self.dataset_config["img_dir"], self.dataset_config["gt_dir"]) \
@@ -293,8 +307,12 @@ class DeCoSegmentor(torch.nn.Module):
         extra_dict = {
             "prompts": prompts,
             "eval_mode": local_config.eval,
-            "img_id": self.idx
+            "img_id": self.idx,
         }
+
+        gt_save_path = f"data/gt/{self.idx}.pt"
+        gt = self.get_gt(x)
+        torch.save(gt[0], gt_save_path)
         
         attention_maps = self.call_with_defaults(image_tensor, label_ids, extra_dict)
         # select slice corresponding to positive prompt

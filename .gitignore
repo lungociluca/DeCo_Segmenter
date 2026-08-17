@@ -16,3 +16,5 @@ prev_attn_maps/*
 run_configs/*
 sio_maps/*
 z_output/*
+data/*
+plots/*

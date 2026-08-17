@@ -70,7 +70,7 @@ eval = True
 background_threshold = 0.3
 unbiasing_components_count = 2
 no_clusters = 8
-
+#271 595 264
 self_attn_softmax_temperature = 0.7
 cross_attn_softmax_temperature = 2000
 aggregated_maps_softmax_temperature = 0.7
@@ -86,7 +86,7 @@ forward_method: ForwardMethod = ForwardMethod.ATTENTION
 
 
 
-dit_blocks = 5
+dit_blocks = 6
 idx_token_of_interest = 4
-eval_samples_limit = 30
+eval_samples_limit = 2000
 use_gate = True
