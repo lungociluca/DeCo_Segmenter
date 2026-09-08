@@ -227,7 +227,7 @@ class DeCoSegmentor(torch.nn.Module):
         self.categs_count = len(self.categs)
 
         # TODO: nums steps hardcoded
-        prompt_format = "The object in the image depicts {prep} {target}"
+        prompt_format = "{target}"
         self.pipeline = Pipeline(None, denoiser, conditioner, None, local_config.device, 100, local_config.guidance,
                                  local_config.timeshift, local_config.order, local_config.save_maps, prompt_format=prompt_format, labels=self.categs)
         denoiser.set_default_prompt_emb(self.pipeline.prompt_embeddings, self.pipeline.token_lenghts)

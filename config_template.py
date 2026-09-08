@@ -51,15 +51,15 @@ datasets = {
 run_on_textures = True
 eval_dataset = EvalDatasets.VOC12
 out_image_path = "out.jpg"
-num_steps = 101
-guidance = 3.0
+num_steps = 20
+guidance = 10.0
 image_height = 512
 image_width = 512
 num_images = 1
-label = "a photograph of a dog"
-neg_label = "a photo of background"
+label = "A realistic scene with dog, cat, flying aeroplane"
+neg_label = "Unrealistic"
 
-seed = 12
+seed = 13
 timeshift = 1
 order = 2
 
@@ -70,7 +70,7 @@ eval = True
 background_threshold = 0.3
 unbiasing_components_count = 2
 no_clusters = 8
-
+#271 595 264
 self_attn_softmax_temperature = 0.7
 cross_attn_softmax_temperature = 2000
 aggregated_maps_softmax_temperature = 0.7
@@ -86,7 +86,9 @@ forward_method: ForwardMethod = ForwardMethod.ATTENTION
 
 
 
-dit_blocks = 5
-idx_token_of_interest = 4
-eval_samples_limit = 30
+dit_blocks = 1
+idx_token_of_interest = 0
+eval_samples_limit = 600
 use_gate = True
+
+ts = 0

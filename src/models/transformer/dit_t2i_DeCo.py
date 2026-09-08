@@ -322,7 +322,7 @@ class Attention(nn.Module):
         # IMAGE PROJECTIONS
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = qkv_x[0]
-        q = q.contiguous()
+        q = self.q_norm(q.contiguous())
         
         # print(q.dtype, self.unbias_matrix.dtype)
         # q = torch.matmul(self.unbias_matrix, einops.rearrange(q, 'b h p d -> b p (h d)').unsqueeze(-1).to('cpu')).squeeze(-1).to(local_config.device)
@@ -337,18 +337,9 @@ class Attention(nn.Module):
         # ky = (ky - ky.mean()) / ky.std()
 
         # cross_attn_maps = q @ ky.transpose(-2, -1) + 1
-        cos = torch.nn.CosineSimilarity(dim=-1)
-        print("cosine q k", q.shape, ky.shape)
-        cross_attn_maps = cos(q, ky) + 4
-        # cross_attn_maps = torch.clamp(cross_attn_maps, min=1.2, max=1.5)
-
-        th = torch.nn.Threshold(0.0, 0.0)
-        # min_max = lambda x,ii: (x[ii] - x[ii].min()) / (x[ii].max() - x[ii].min())
-        # for ii in range(cross_attn_maps.shape[-1]):
-        #     cross_attn_maps[ii] = min_max(cross_attn_maps, ii)
-
-        # cross_attn_maps = th(cross_attn_maps[0:no_prompts] - cross_attn_maps[[no_prompts]])
-        cross_attn_maps = th(cross_attn_maps)
+        apply_norm = lambda x: x#torch.nn.functional.normalize(x, dim=-1)
+        print(q.shape, ky.shape)
+        cross_attn_maps = apply_norm(q) @ apply_norm(ky).permute(0,1,3,2)
         aggregated_attn_maps = cross_attn_maps.mean(1).unsqueeze(-1)
         for i in range(no_prompts):
             aggregated_attn_maps[i] = (aggregated_attn_maps[i] - aggregated_attn_maps[i].min()) / (aggregated_attn_maps[i].max() - aggregated_attn_maps[i].min())

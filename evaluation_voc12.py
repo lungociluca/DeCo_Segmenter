@@ -200,7 +200,7 @@ class Args:
     val_split = 1.
     comment='train1464'
     curve=True
-    end=15
+    end=30
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
