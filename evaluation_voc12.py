@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, sys.path[0]+"/../..")
 
 
-voc_path = "/Users/lungociluca/Downloads/VOCdevkit/VOC2012"
+voc_path = "../datasets/VOCdevkit/VOC2012"
 
 categories = ['background','aeroplane','bicycle','bird','boat','bottle','bus','car','cat','chair','cow',
               'diningtable','dog','horse','motorbike','person','pottedplant','sheep','sofa','train','tvmonitor']
@@ -197,10 +197,10 @@ def save_sample_segmentations(args):
 
 
 class Args:
-    val_split = 0.5
+    val_split = 1.
     comment='train1464'
     curve=True
-    end=70
+    end=51
     base_dir = 'sio_maps'
     image_dir = os.path.join(base_dir,'images')
     cam_npy_dir = os.path.join(base_dir, 'images')
@@ -209,7 +209,7 @@ class Args:
     # list='/root/autodl-tmp/wjl/ptp_diffusion/voc12/train_aug_id.txt'
     logfile=os.path.join(base_dir,'eval.txt')
     num_classes=21
-    start=1
+    start=50
     t=None
     type='npy'
     sample_images=True

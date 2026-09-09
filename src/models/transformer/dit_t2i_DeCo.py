@@ -318,6 +318,7 @@ class Attention(nn.Module):
     def cluster(self, q, no_centroids):
         P, D = q.shape
         centroids = torch.randn((no_centroids, D)).to(q.device)
+        centroids = torch.nn.functional.normalize(centroids, dim=-1)
 
         # Define the number of iterations
         num_iterations = 50
@@ -440,68 +441,37 @@ class Attention(nn.Module):
         qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv_x
 
-        xx = q
-        xx = torch.functional.F.normalize(einops.rearrange(xx, "b h p d -> p (b h d)"), dim=1)
-        cos_sim = xx @ xx.T
-
-        max_rows = cos_sim.max(dim=-1)[0]
-        hello = lambda i: 1 if cos_sim[i,i] == max_rows[i] else 0
-        max_diag_count = sum([hello(i) for i in range(cos_sim.shape[0])])
-        print("Max diag", max_diag_count, "out of", cos_sim.shape[0])
-
-        # Plot
-        plt.figure(figsize=(8, 6))
-        plt.imshow(cos_sim.cpu().numpy(), vmin=-1, vmax=1)
-        plt.colorbar(label="Cosine similarity")
-        plt.title("Cosine Similarity Matrix")
-        plt.xlabel("Vector index")
-        plt.ylabel("Vector index")
-        plt.tight_layout()
-        plt.savefig(f"z_output/similarity_{extra_dict['img_id']}_{l}.png")
-        plt.close()
-
-        is_max_patch = torch.LongTensor([hello(i) for i in range(N)])
-
-        # plt.figure(figsize=(8, 6))
-        # plt.imshow(is_max_patch.reshape(img_h, img_w).cpu().numpy(), vmin=-1, vmax=1)
-        # plt.title("Is max patch")
-        # plt.xlabel("Vector index")
-        # plt.ylabel("Vector index")
-        # plt.tight_layout()
-        # plt.savefig(f"z_output/max_{extra_dict['img_id']}.png")
-        # plt.close()
-
-        ky = torch.cat([self.prompt_embs[[i.item()]] for i in class_ids], dim=0).unsqueeze(2)
-        rearr = lambda x: einops.rearrange(x, "b h p d -> (b p) (h d)")
-        norm_func = lambda x: torch.nn.functional.normalize(x, dim=-1)
-        min_max = lambda x: (x - x.min()) / (x.max() - x.min())
-        comp = lambda x: norm_func(rearr(x))
-        print('mul', comp(ky).shape, comp(q).T.shape)
-        cross = comp(ky) @ comp(q).T
-        for idx in range(cross.shape[0]):
-            plt.figure(figsize=(8, 6))
-            plt.imshow(min_max(cross[idx]).reshape(img_h, img_w).cpu().numpy(), vmin=-1, vmax=1)
-            plt.colorbar(label="Cosine similarity")
-            plt.title("Cosine Similarity Matrix")
-            plt.xlabel("Vector index")
-            plt.ylabel("Vector index")
-            plt.tight_layout()
-            plt.savefig(f"z_output/cross_{extra_dict['img_id']}_{idx}_{l}.png")
-            plt.close()
-        
-        
-        q = (q - q.mean()) / q.std()
-        # q = q / torch.norm(q, dim=-1).unsqueeze(-1)
-        
-        orig_img = torch.nn.functional.interpolate(extra_dict["image"].unsqueeze(0), [img_h, img_w], mode='bilinear', align_corners=False).squeeze(0)
-
-        labels = self.cluster(einops.rearrange(q[0], 'h p d -> p (h d)'), local_config.no_clusters)
+        q = einops.rearrange(v[0], 'h p d -> p (h d)').contiguous()
+        # q = torch.nn.functional.normalize(q, dim=-1)
+        labels = self.cluster(q, local_config.no_clusters)
         labels_img = labels.view(img_h, img_w)
-        self.visualize_prediction(orig_img.detach().cpu(), is_max_patch.reshape(img_h, img_w).cpu().numpy(), 2, ['0', '1'], f'max_{extra_dict["img_id"]}_{l}')
+        # self.visualize_prediction(orig_img.detach().cpu(), is_max_patch.reshape(img_h, img_w).cpu().numpy(), 2, ['0', '1'], f'max_{extra_dict["img_id"]}_{l}')
         
-        self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), local_config.no_clusters, [str(i) for i in range(local_config.no_clusters)], f'{extra_dict["img_id"]}_{l}')
+        # self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), local_config.no_clusters, [str(i) for i in range(local_config.no_clusters)], f'{extra_dict["img_id"]}_{l}')
         return self.forward_orig(x, y, pos, class_ids=class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=local_config.device), labels
-    
+
+    def forward_attention(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
+            img_w: int = None, eval_mode=False,l=1000):
+        B, N, C = x.shape
+        no_prompts = y.shape[0]
+        # IMAGE PROJECTIONS
+        qkv_x = self.qkv_x(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv_x
+
+        q = einops.rearrange(v[0], 'h p d -> p (h d)').contiguous()
+        q = torch.nn.functional.normalize(q, dim=-1)
+        
+        from sklearn.cluster import DBSCAN
+        dbscan = DBSCAN(eps=local_config.eps / 100, min_samples=local_config.min_samples)
+        labels = torch.from_numpy(dbscan.fit_predict(q.detach().cpu())).to(x.device)
+        # labels = self.cluster(q, local_config.no_clusters)
+        labels_img = labels.view(img_h, img_w)
+
+        orig_img = torch.nn.functional.interpolate(extra_dict["image"].unsqueeze(0), [img_h, img_w], mode='bilinear', align_corners=False).squeeze(0)
+        # self.visualize_prediction(orig_img.detach().cpu(), labels_img.detach().cpu(), local_config.no_clusters, [str(i) for i in range(local_config.no_clusters)], f'{extra_dict["img_id"]}_{l}')
+
+        return self.forward_orig(x, y, pos, class_ids=class_ids) if local_config.dit_blocks > 1 else torch.zeros(x.shape, device=local_config.device), labels
+
     def forward(self, x: torch.Tensor, y, class_ids, pos, token_lengths, extra_dict=None, attention_maps_dir: str = None, img_h: int = None, 
             img_w: int = None, eval_mode=False,l=1000):
         config_forward_method: local_config.ForwardMethod = local_config.forward_method
@@ -927,7 +897,7 @@ class PixNerDiT(nn.Module):
         B, H, W = gt.shape
 
         gt = gt.to(local_config.device)
-        gt = torch.nn.functional.interpolate(gt.unsqueeze(0), (h, w), mode="bilinear", align_corners=False)[0,0]
+        gt = torch.nn.functional.interpolate(gt.unsqueeze(0).float(), (h, w), mode="nearest")[0,0]
 
         maps = maps.reshape(h, w)
         gt_pred = torch.zeros((no_prompts, h, w), device=local_config.device)

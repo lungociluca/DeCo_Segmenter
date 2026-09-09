@@ -13,3 +13,4 @@ webdataset
 tensorboard
 matplotlib
 einops
+scikit-learn
